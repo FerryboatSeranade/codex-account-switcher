@@ -7,6 +7,7 @@ import {
   ChevronDown,
   CheckCircle2,
   Clock3,
+  Code2,
   ExternalLink,
   FileText,
   FileKey2,
@@ -19,6 +20,7 @@ import {
   Rocket,
   Settings2,
   ShieldCheck,
+  Terminal,
   Trash2,
   UserRoundPlus,
   Zap
@@ -27,6 +29,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type ProfileKind = "chat_gpt_login" | "proxy_api_key" | "custom";
 type CodexSystem = "account" | "api";
+type ClientPreference = "codex_app" | "vscode_extension" | "cli_other";
 
 type CurrentCodexState = {
   codex_dir: string;
@@ -71,6 +74,7 @@ type ProfileSummary = {
 
 type AppState = {
   current: CurrentCodexState;
+  client_preference: ClientPreference;
   profiles: ProfileSummary[];
 };
 
@@ -82,6 +86,11 @@ type ClearCodexStateResult = {
 };
 
 type SwitchProfileResult = {
+  message: string;
+  app_state: AppState;
+};
+
+type ClientPreferenceResult = {
   message: string;
   app_state: AppState;
 };
@@ -211,13 +220,48 @@ const systemLabel: Record<CodexSystem, string> = {
   api: "只用 API Key"
 };
 
+const clientPreferenceMeta: Record<
+  ClientPreference,
+  {
+    label: string;
+    detail: string;
+    refreshHint: string;
+    topbarAction: string;
+    resetWarning: string;
+  }
+> = {
+  codex_app: {
+    label: "Codex App",
+    detail: "切换后可自动关闭并重新打开桌面 Codex。",
+    refreshHint: "请重启 Codex App，让新的 auth.json/config.toml 生效。",
+    topbarAction: "重启 Codex",
+    resetWarning: "这个操作会关闭当前正在运行的 Codex App。"
+  },
+  vscode_extension: {
+    label: "VS Code 扩展",
+    detail: "只写入 ~/.codex，不自动关闭 VS Code。",
+    refreshHint: "请在 VS Code 中执行 Reload Window，或重启 VS Code，让 Codex 扩展重新读取 ~/.codex。",
+    topbarAction: "VS Code 提示",
+    resetWarning: "这个操作不会关闭 VS Code，只会备份并修改 ~/.codex 状态文件。"
+  },
+  cli_other: {
+    label: "CLI/其他",
+    detail: "只写入 ~/.codex，由用户重启终端或相关进程。",
+    refreshHint: "请重启当前终端里的 Codex CLI/相关进程，让它重新读取 ~/.codex。",
+    topbarAction: "刷新提示",
+    resetWarning: "这个操作不会关闭其他客户端，只会备份并修改 ~/.codex 状态文件。"
+  }
+};
+
+const clientPreferenceOptions: ClientPreference[] = ["codex_app", "vscode_extension", "cli_other"];
+
 const probeStatusLabel: Record<SystemProbeStatus, string> = {
   ok: "正常",
   warning: "提醒",
   error: "失败"
 };
 
-const appBuildLabel = "v0.1.8-auto-update";
+const appBuildLabel = "v0.1.9-client-preference";
 const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const AUTO_UPDATE_LAST_CHECK_KEY = "codex-account-switcher:last-auto-update-check";
 
@@ -395,6 +439,7 @@ function previewState(): AppState {
       active_profile_id: undefined,
       session_size: 0
     },
+    client_preference: "codex_app",
     profiles: []
   };
 }
@@ -436,6 +481,9 @@ function App() {
     () => state?.profiles.find((profile) => profile.is_active),
     [state]
   );
+  const clientPreference = state?.client_preference ?? "codex_app";
+  const clientPreferenceInfo = clientPreferenceMeta[clientPreference];
+  const manageCodexApp = clientPreference === "codex_app";
 
   function clearProbeReport() {
     setSystemProbe(null);
@@ -563,7 +611,7 @@ function App() {
 
   function switchTo(profile: ProfileSummary) {
     setPendingSwitch(profile);
-    setRestartCodex(true);
+    setRestartCodex(manageCodexApp);
   }
 
   async function confirmSwitch() {
@@ -583,7 +631,7 @@ function App() {
       let message = `${profile.name} 已切换`;
       if (restartCodex) {
         const result = await invoke<SwitchProfileResult>("switch_profile_and_restart", {
-          input: { id: profile.id }
+          input: { id: profile.id, restart_codex_app: manageCodexApp }
         });
         setState(result.app_state);
         message = `${profile.name} 已切换。${result.message}`;
@@ -592,11 +640,48 @@ function App() {
           input: { id: profile.id }
         });
         setState(nextState);
+        message = `${profile.name} 已切换。${clientPreferenceInfo.refreshHint}`;
       }
       setPendingSwitch(null);
       setNotice(message);
+      setLastAction({ kind: "success", title: "切换完成", detail: message });
     } catch (err) {
-      setError(String(err));
+      const detail = String(err);
+      setError(detail);
+      setLastAction({
+        kind: "error",
+        title: "切换失败",
+        detail,
+        action: needsAdminRestart(detail) ? "restart-admin" : undefined
+      });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function saveClientPreference(preference: ClientPreference) {
+    setError("");
+    setNotice("");
+    setLastAction(null);
+    clearProbeReport();
+    setBusy("client-preference");
+    try {
+      if (!isTauriRuntime()) {
+        setState((current) =>
+          current ? { ...current, client_preference: preference } : current
+        );
+        return;
+      }
+      const result = await invoke<ClientPreferenceResult>("set_client_preference", {
+        input: { preference }
+      });
+      setState(result.app_state);
+      setNotice(result.message);
+      setLastAction({ kind: "success", title: "目标客户端已更新", detail: result.message });
+    } catch (err) {
+      const detail = String(err);
+      setError(detail);
+      setLastAction({ kind: "error", title: "保存目标客户端失败", detail });
     } finally {
       setBusy("");
     }
@@ -613,6 +698,12 @@ function App() {
     setNotice("");
     setLastAction(null);
     clearProbeReport();
+    if (!manageCodexApp) {
+      const detail = clientPreferenceInfo.refreshHint;
+      setNotice(detail);
+      setLastAction({ kind: "info", title: clientPreferenceInfo.topbarAction, detail });
+      return;
+    }
     setBusy("restart-codex");
     try {
       if (!isTauriRuntime()) {
@@ -640,6 +731,12 @@ function App() {
     setNotice("");
     setLastAction(null);
     clearProbeReport();
+    if (!manageCodexApp) {
+      const detail = "当前目标客户端不是 Codex App，切号器不会关闭 VS Code 或终端。";
+      setNotice(detail);
+      setLastAction({ kind: "info", title: "无需关闭 Codex App", detail });
+      return;
+    }
     setBusy("quit-codex");
     try {
       if (!isTauriRuntime()) {
@@ -1032,11 +1129,17 @@ function App() {
     setPendingReset(false);
     setError("");
     clearProbeReport();
-    setNotice("正在停止 Codex、备份并重置账号状态...");
+    setNotice(
+      manageCodexApp
+        ? "正在停止 Codex App、备份并重置账号状态..."
+        : "正在备份并重置账号状态..."
+    );
     setLastAction({
       kind: "info",
       title: "正在重置账号状态",
-      detail: "正在停止 Codex、备份 auth.json/config.toml，并删除这两个 live 状态文件。"
+      detail: manageCodexApp
+        ? "正在停止 Codex App、备份 auth.json/config.toml，并删除这两个 live 状态文件。"
+        : "正在备份 auth.json/config.toml，并删除这两个 live 状态文件。"
     });
     setBusy("reset-account");
     try {
@@ -1096,11 +1199,16 @@ function App() {
           </button>
           <button className="ghost topbar-action" onClick={restartCodexApp} disabled={!!busy}>
             {busy === "restart-codex" ? <Loader2 className="spin" /> : <Power />}
-            重启 Codex
+            {clientPreferenceInfo.topbarAction}
           </button>
-          <button className="danger text-danger topbar-action" onClick={quitCodexApp} disabled={!!busy}>
+          <button
+            className="danger text-danger topbar-action"
+            onClick={quitCodexApp}
+            disabled={!!busy || !manageCodexApp}
+            title={manageCodexApp ? "关闭 Codex App" : "当前目标客户端不是 Codex App"}
+          >
             {busy === "quit-codex" ? <Loader2 className="spin" /> : <Power />}
-            关闭 Codex
+            关闭 Codex App
           </button>
           <button className="icon-button" onClick={load} disabled={!!busy} title="刷新状态">
             {busy === "refresh" ? <Loader2 className="spin" /> : <RefreshCw />}
@@ -1190,6 +1298,38 @@ function App() {
             <div className="active-pill">
               {activeProfile ? activeProfile.name : "未匹配到已保存档案"}
             </div>
+            <div className="client-preference-block">
+              <div className="status-title">
+                {clientPreference === "vscode_extension" ? (
+                  <Code2 />
+                ) : clientPreference === "cli_other" ? (
+                  <Terminal />
+                ) : (
+                  <Power />
+                )}
+                <span>目标客户端</span>
+              </div>
+              <div className="client-options" role="radiogroup" aria-label="目标客户端偏好">
+                {clientPreferenceOptions.map((preference) => {
+                  const meta = clientPreferenceMeta[preference];
+                  const selected = clientPreference === preference;
+                  return (
+                    <button
+                      className={selected ? "client-option selected" : "client-option"}
+                      key={preference}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      onClick={() => saveClientPreference(preference)}
+                      disabled={!!busy || selected}
+                    >
+                      <strong>{meta.label}</strong>
+                      <small>{meta.detail}</small>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
             <dl>
               <div>
                 <dt>账号邮箱</dt>
@@ -1218,6 +1358,10 @@ function App() {
               <div>
                 <dt>聊天会话</dt>
                 <dd>所有档案共享</dd>
+              </div>
+              <div>
+                <dt>客户端偏好</dt>
+                <dd>{clientPreferenceInfo.label}</dd>
               </div>
               <div>
                 <dt>会话大小</dt>
@@ -1669,18 +1813,29 @@ function App() {
           </dl>
           <div className="switch-note">
             只切换 auth.json 和 config.toml；所有账号/API 档案继续共用同一套 Codex thread。
+            当前目标客户端：{clientPreferenceInfo.label}。
           </div>
-          <label className="check-row">
-            <input
-              type="checkbox"
-              checked={restartCodex}
-              onChange={(event) => setRestartCodex(event.target.checked)}
-            />
-            <span>
-              <strong>切换后重启 Codex app</strong>
-              <small>macOS 使用 open -a Codex，Windows 使用 taskkill/PowerShell，Linux 尝试桌面入口或 codex 命令。</small>
-            </span>
-          </label>
+          {manageCodexApp ? (
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={restartCodex}
+                onChange={(event) => setRestartCodex(event.target.checked)}
+              />
+              <span>
+                <strong>切换后重启 Codex App</strong>
+                <small>macOS 使用 open -a Codex，Windows 使用 taskkill/PowerShell，Linux 尝试桌面入口或 codex 命令。</small>
+              </span>
+            </label>
+          ) : (
+            <div className="check-row info-row">
+              {clientPreference === "vscode_extension" ? <Code2 /> : <Terminal />}
+              <span>
+                <strong>切换后只写入 ~/.codex</strong>
+                <small>{clientPreferenceInfo.refreshHint}</small>
+              </span>
+            </div>
+          )}
           <div className="modal-actions">
             <button className="ghost" onClick={() => setPendingSwitch(null)} disabled={!!busy}>
               取消
@@ -1704,10 +1859,10 @@ function App() {
             <h2 id="delete-title">确认重置账号状态</h2>
           </div>
           <div className="delete-warning">
-            <strong>这个操作会关闭当前正在运行的 Codex app。</strong>
+            <strong>{clientPreferenceInfo.resetWarning}</strong>
             <p>
               切号器会先备份 live 的 auth.json 和 config.toml，然后删除这两个文件，
-              最后刷新当前状态。下次打开 Codex 时需要重新登录或重新配置 API Key。
+              最后刷新当前状态。{clientPreferenceInfo.refreshHint}
             </p>
           </div>
           <dl className="confirm-grid">
@@ -1716,8 +1871,8 @@ function App() {
               <dd>auth.json 和 config.toml</dd>
             </div>
             <div>
-              <dt>Codex app</dt>
-              <dd>删除前会关闭</dd>
+              <dt>目标客户端</dt>
+              <dd>{clientPreferenceInfo.label}</dd>
             </div>
             <div>
               <dt>备份</dt>

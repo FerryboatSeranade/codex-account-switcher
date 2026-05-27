@@ -56,7 +56,18 @@ enum CodexSystem {
 struct Store {
     #[serde(default)]
     active_profile_id: Option<String>,
+    #[serde(default)]
+    client_preference: ClientPreference,
     profiles: Vec<Profile>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ClientPreference {
+    #[default]
+    CodexApp,
+    VscodeExtension,
+    CliOther,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,6 +124,7 @@ struct AccountInfo {
 #[derive(Debug, Serialize)]
 struct AppState {
     current: CurrentCodexState,
+    client_preference: ClientPreference,
     profiles: Vec<ProfileSummary>,
 }
 
@@ -204,6 +216,12 @@ struct SwitchProfileResult {
 }
 
 #[derive(Debug, Serialize)]
+struct ClientPreferenceResult {
+    message: String,
+    app_state: AppState,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum SystemProbeStatus {
     Ok,
@@ -263,6 +281,11 @@ struct HostsMappingInput {
     comment: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ClientPreferenceInput {
+    preference: ClientPreference,
+}
+
 #[derive(Debug, Serialize)]
 struct GogoaisCodexKeyResult {
     api_key: String,
@@ -294,6 +317,8 @@ fn gogoais_error_message(status: reqwest::StatusCode, value: Option<&serde_json:
 #[derive(Debug, Deserialize)]
 struct SwitchInput {
     id: String,
+    #[serde(default)]
+    restart_codex_app: bool,
 }
 
 fn codex_dir() -> Result<PathBuf, String> {
@@ -378,6 +403,7 @@ fn load_store() -> Result<Store, String> {
     if !path.exists() {
         return Ok(Store {
             active_profile_id: None,
+            client_preference: ClientPreference::default(),
             profiles: vec![],
         });
     }
@@ -1175,6 +1201,18 @@ fn restart_codex_process() -> Result<(), String> {
     start_codex_process()
 }
 
+fn client_refresh_hint(preference: &ClientPreference) -> &'static str {
+    match preference {
+        ClientPreference::CodexApp => "Codex App 已自动处理。",
+        ClientPreference::VscodeExtension => "请在 VS Code 中执行 Reload Window，或重启 VS Code 后让 Codex 扩展重新读取 ~/.codex。",
+        ClientPreference::CliOther => "请重启当前终端里的 Codex CLI/相关进程，让它重新读取 ~/.codex。",
+    }
+}
+
+fn should_manage_codex_app(preference: &ClientPreference) -> bool {
+    matches!(preference, ClientPreference::CodexApp)
+}
+
 #[cfg(target_os = "windows")]
 fn restart_switcher_as_admin_process() -> Result<(), String> {
     let current_exe = env::current_exe().map_err(|err| format!("读取当前程序路径失败：{err}"))?;
@@ -1422,10 +1460,12 @@ fn best_login_profile(store: &Store) -> Option<Profile> {
 fn restore_account_mode() -> Result<RestoreAccountModeResult, String> {
     let dir = codex_dir()?;
     fs::create_dir_all(&dir).map_err(|err| format!("创建 ~/.codex 目录失败：{}", err))?;
-    quit_codex_process()?;
+    let mut store = load_store()?;
+    if should_manage_codex_app(&store.client_preference) {
+        quit_codex_process()?;
+    }
     let backup_dir = backup_current()?;
     let current_config = read_optional(&dir.join("config.toml"))?;
-    let mut store = load_store()?;
     let login_profile = best_login_profile(&store);
     let auth_json = login_profile
         .as_ref()
@@ -1451,14 +1491,17 @@ fn restore_account_mode() -> Result<RestoreAccountModeResult, String> {
     store.active_profile_id = login_profile.as_ref().map(|profile| profile.id.clone());
     save_store(&store)?;
     update_recent_thread_providers();
-    restart_codex_process()?;
+    if should_manage_codex_app(&store.client_preference) {
+        restart_codex_process()?;
+    }
     let used_profile_name = login_profile.as_ref().map(|profile| profile.name.clone());
-    let message = if let Some(name) = &used_profile_name {
+    let base_message = if let Some(name) = &used_profile_name {
         format!("已恢复官方账号体系并使用账号档案「{name}」，中转 Base URL/API Key 已从 live 配置移除。")
     } else {
         "已恢复官方账号体系并移除中转 Base URL/API Key；未找到保存的登录 tokens，请在 Codex 里重新登录。"
             .to_string()
     };
+    let message = format!("{base_message} {}", client_refresh_hint(&store.client_preference));
 
     Ok(RestoreAccountModeResult {
         message,
@@ -1472,7 +1515,10 @@ fn restore_account_mode() -> Result<RestoreAccountModeResult, String> {
 fn clear_codex_state() -> Result<ClearCodexStateResult, String> {
     let dir = codex_dir()?;
     fs::create_dir_all(&dir).map_err(|err| format!("创建 ~/.codex 目录失败：{}", err))?;
-    quit_codex_process()?;
+    let mut store = load_store()?;
+    if should_manage_codex_app(&store.client_preference) {
+        quit_codex_process()?;
+    }
     let backup_dir = backup_current()?;
     let mut removed = Vec::new();
     for name in ["auth.json", "config.toml"] {
@@ -1483,7 +1529,6 @@ fn clear_codex_state() -> Result<ClearCodexStateResult, String> {
             removed.push(name.to_string());
         }
     }
-    let mut store = load_store()?;
     if store.active_profile_id.is_some() {
         store.active_profile_id = None;
         save_store(&store)?;
@@ -1491,9 +1536,15 @@ fn clear_codex_state() -> Result<ClearCodexStateResult, String> {
     let app_state = get_app_state()?;
     let message = if removed.is_empty() {
         "没有可重置的 auth.json 或 config.toml".to_string()
-    } else {
+    } else if should_manage_codex_app(&store.client_preference) {
         restart_codex_process()?;
-        format!("已停止 Codex、重置 {} 并重新启动。", removed.join("、"))
+        format!("已停止 Codex App、重置 {} 并重新启动。", removed.join("、"))
+    } else {
+        format!(
+            "已备份并重置 {}。{}",
+            removed.join("、"),
+            client_refresh_hint(&store.client_preference)
+        )
     };
     Ok(ClearCodexStateResult {
         message,
@@ -1511,7 +1562,10 @@ fn delete_codex_file(name: String) -> Result<DeleteCodexFileResult, String> {
     }
     let dir = codex_dir()?;
     fs::create_dir_all(&dir).map_err(|err| format!("创建 ~/.codex 目录失败：{}", err))?;
-    quit_codex_process()?;
+    let mut store = load_store()?;
+    if should_manage_codex_app(&store.client_preference) {
+        quit_codex_process()?;
+    }
     let backup_dir = backup_current()?;
     let path = dir.join(name);
     let removed = if path.exists() {
@@ -1522,16 +1576,19 @@ fn delete_codex_file(name: String) -> Result<DeleteCodexFileResult, String> {
         None
     };
     if name == "auth.json" && removed.is_some() {
-        let mut store = load_store()?;
         if store.active_profile_id.is_some() {
             store.active_profile_id = None;
             save_store(&store)?;
         }
     }
-    let message = if removed.is_some() {
-        format!("已停止 Codex 并删除 {name}")
+    let message = if removed.is_some() && should_manage_codex_app(&store.client_preference) {
+        format!("已停止 Codex App 并删除 {name}")
+    } else if removed.is_some() {
+        format!("已备份并删除 {name}。{}", client_refresh_hint(&store.client_preference))
+    } else if should_manage_codex_app(&store.client_preference) {
+        format!("已停止 Codex App；{name} 不存在，无需删除")
     } else {
-        format!("已停止 Codex；{name} 不存在，无需删除")
+        format!("{name} 不存在，无需删除。{}", client_refresh_hint(&store.client_preference))
     };
     Ok(DeleteCodexFileResult {
         message,
@@ -1548,6 +1605,7 @@ fn get_app_state() -> Result<AppState, String> {
     let active_id =
         active_profile(&store, &current_config, &current_auth).map(|profile| profile.id.clone());
     let current = current_state(active_id.clone())?;
+    let client_preference = store.client_preference.clone();
     let profiles = store
         .profiles
         .iter()
@@ -1561,7 +1619,26 @@ fn get_app_state() -> Result<AppState, String> {
         })
         .collect();
 
-    Ok(AppState { current, profiles })
+    Ok(AppState {
+        current,
+        client_preference,
+        profiles,
+    })
+}
+
+#[tauri::command]
+fn set_client_preference(input: ClientPreferenceInput) -> Result<ClientPreferenceResult, String> {
+    let mut store = load_store()?;
+    store.client_preference = input.preference;
+    save_store(&store)?;
+    let message = format!(
+        "已设置目标客户端偏好。{}",
+        client_refresh_hint(&store.client_preference)
+    );
+    Ok(ClientPreferenceResult {
+        message,
+        app_state: get_app_state()?,
+    })
 }
 
 #[tauri::command]
@@ -1760,7 +1837,7 @@ fn switch_profile(input: SwitchInput) -> Result<AppState, String> {
     apply_profile(input.id, false)
 }
 
-fn apply_profile(id: String, restart: bool) -> Result<AppState, String> {
+fn apply_profile(id: String, manage_codex_app: bool) -> Result<AppState, String> {
     let mut store = load_store()?;
     let target_profile = store
         .profiles
@@ -1771,7 +1848,7 @@ fn apply_profile(id: String, restart: bool) -> Result<AppState, String> {
 
     let dir = codex_dir()?;
     fs::create_dir_all(&dir).map_err(|err| format!("创建 ~/.codex 目录失败：{}", err))?;
-    if restart {
+    if manage_codex_app {
         quit_codex_process()?;
     }
     backup_current()?;
@@ -1779,7 +1856,7 @@ fn apply_profile(id: String, restart: bool) -> Result<AppState, String> {
     write_optional(&dir.join("auth.json"), &target_profile.auth_json)?;
     store.active_profile_id = Some(target_profile.id);
     save_store(&store)?;
-    if restart {
+    if manage_codex_app {
         thread::sleep(Duration::from_millis(500));
         start_codex_process()?;
     }
@@ -1788,9 +1865,18 @@ fn apply_profile(id: String, restart: bool) -> Result<AppState, String> {
 
 #[tauri::command]
 fn switch_profile_and_restart(input: SwitchInput) -> Result<SwitchProfileResult, String> {
-    let app_state = apply_profile(input.id, true)?;
+    let store = load_store()?;
+    let manage_codex_app =
+        input.restart_codex_app && should_manage_codex_app(&store.client_preference);
+    let preference = store.client_preference.clone();
+    let app_state = apply_profile(input.id, manage_codex_app)?;
+    let message = if manage_codex_app {
+        "已停止 Codex App、切换档案并重新启动。".to_string()
+    } else {
+        format!("已切换档案。{}", client_refresh_hint(&preference))
+    };
     Ok(SwitchProfileResult {
-        message: "已停止 Codex、切换档案并重新启动。".to_string(),
+        message,
         app_state,
     })
 }
@@ -2919,6 +3005,7 @@ pub fn run() {
             import_current_profile,
             create_proxy_profile,
             fetch_gogoais_codex_key,
+            set_client_preference,
             switch_profile,
             switch_profile_and_restart,
             delete_profile,

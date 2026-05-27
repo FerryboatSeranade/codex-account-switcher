@@ -396,6 +396,51 @@ h3 {
   white-space: nowrap;
 }
 
+.client-preference-block {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #dce3ee;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.client-options {
+  display: grid;
+  gap: 8px;
+}
+
+.client-option {
+  display: grid;
+  gap: 3px;
+  min-height: 54px;
+  padding: 9px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  color: #3c4658;
+  background: #f8fafc;
+  text-align: left;
+}
+
+.client-option strong {
+  color: #1c2738;
+  font-size: 13px;
+}
+
+.client-option small {
+  color: #647086;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.client-option.selected {
+  border-color: #9edbd1;
+  color: #0d5f56;
+  background: #e8f8f5;
+  box-shadow: inset 0 0 0 1px rgba(15, 139, 124, 0.12);
+}
+
 dl {
   margin: 16px 0 0;
 }
@@ -1006,6 +1051,11 @@ textarea:focus {
 .check-row span {
   display: grid;
   gap: 4px;
+}
+
+.info-row svg {
+  margin-top: 2px;
+  color: #0f8b7c;
 }
 
 .check-row small {

@@ -617,6 +617,55 @@ label {
   line-height: 1.45;
 }
 
+.proxy-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 5px;
+  border-radius: 8px;
+  background: #eef2f7;
+}
+
+.proxy-tab {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-radius: 8px;
+  color: #566277;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.proxy-tab svg {
+  width: 16px;
+  height: 16px;
+}
+
+.proxy-tab.selected {
+  color: #111827;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.proxy-tab.pending {
+  color: #9a6700;
+}
+
+.proxy-tab.pending.selected {
+  background: #fff7df;
+}
+
+.proxy-tab.logged-in {
+  color: #0d5f56;
+}
+
+.proxy-tab.logged-in.selected {
+  background: #e8f8f5;
+}
+
 .key-fetch-panel {
   display: grid;
   gap: 10px;
@@ -640,6 +689,11 @@ label {
   color: #647086;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.proxy-config-panel {
+  display: grid;
+  gap: 12px;
 }
 
 .fetch-key-button {

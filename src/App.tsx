@@ -3,6 +3,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import {
   Activity,
+  AlertTriangle,
   ChevronDown,
   CheckCircle2,
   Clock3,
@@ -16,6 +17,7 @@ import {
   Power,
   RefreshCw,
   Rocket,
+  Settings2,
   ShieldCheck,
   Trash2,
   UserRoundPlus,
@@ -215,7 +217,7 @@ const probeStatusLabel: Record<SystemProbeStatus, string> = {
   error: "失败"
 };
 
-const appBuildLabel = "v0.1.6-hosts-mapping";
+const appBuildLabel = "v0.1.7-proxy-tabs";
 
 function needsAdminRestart(detail: string) {
   return (
@@ -363,6 +365,8 @@ function App() {
   const [notice, setNotice] = useState("");
   const [lastAction, setLastAction] = useState<ActionFeedback | null>(null);
   const [mode, setMode] = useState<"import" | "proxy">("proxy");
+  const [proxyTab, setProxyTab] = useState<"login" | "config">("login");
+  const [gogoaisLoggedIn, setGogoaisLoggedIn] = useState(false);
   const [pendingSwitch, setPendingSwitch] = useState<ProfileSummary | null>(null);
   const [pendingReset, setPendingReset] = useState(false);
   const [restartCodex, setRestartCodex] = useState(true);
@@ -470,9 +474,17 @@ function App() {
 
   function submitProxy(event: FormEvent) {
     event.preventDefault();
+    if (proxyTab === "login") {
+      fetchGogoaisCodexKey();
+      return;
+    }
     runAction("proxy", () =>
       invoke<AppState>("create_proxy_profile", { input: proxyForm })
-    ).then(() => setProxyForm({ ...defaultProxyForm, api_key: "" }));
+    ).then(() => {
+      setProxyForm({ ...defaultProxyForm, api_key: "" });
+      setGogoaisLoggedIn(false);
+      setProxyTab("login");
+    });
   }
 
   function switchTo(profile: ProfileSummary) {
@@ -898,10 +910,13 @@ function App() {
       setNotice(detail);
       setLastAction({ kind: "success", title: "中转 API Key 已填入", detail });
       setGogoaisLogin((current) => ({ ...current, password: "" }));
+      setGogoaisLoggedIn(true);
+      setProxyTab("config");
     } catch (err) {
       const detail = gogoaisKeyErrorMessage(err);
       setError(detail);
       setLastAction({ kind: "error", title: "获取中转 API Key 失败", detail });
+      setGogoaisLoggedIn(false);
     } finally {
       setBusy("");
     }
@@ -1281,115 +1296,145 @@ function App() {
             </form>
           ) : (
             <form className="form-panel" onSubmit={submitProxy}>
-              <label>
-                档案名称
-                <input
-                  value={proxyForm.name}
-                  onChange={(event) => setProxyForm({ ...proxyForm, name: event.target.value })}
-                />
-              </label>
-              <label>
-                Base URL
-                <input
-                  value={proxyForm.base_url}
-                  onChange={(event) => setProxyForm({ ...proxyForm, base_url: event.target.value })}
-                />
-              </label>
-              <label>
-                认证方式
-                <select
-                  value={proxyForm.codex_system}
-                  onChange={(event) =>
-                    setProxyForm({ ...proxyForm, codex_system: event.target.value as CodexSystem })
-                  }
-                >
-                  <option value="account">沿用 ChatGPT 登录态，API Key 兜底</option>
-                  <option value="api">只用 API Key</option>
-                </select>
-              </label>
-              <p className="field-hint">
-                沿用登录态会保留当前 ChatGPT token，并把中转 Base URL 写进 config；只用 API Key 会写入 OPENAI_API_KEY。
-              </p>
-              <div className="key-fetch-panel">
-                <div>
-                  <strong>通过 gogoais 账号获取 API Key</strong>
-                  <small>账号密码只用于本次请求，成功后自动填入下方 API Key 和 Base URL，不保存密码。</small>
-                </div>
-                <label>
-                  账号
-                  <input
-                    value={gogoaisLogin.username}
-                    onChange={(event) =>
-                      setGogoaisLogin({ ...gogoaisLogin, username: event.target.value })
-                    }
-                    placeholder="邮箱或用户名"
-                    autoComplete="username"
-                  />
-                </label>
-                <label>
-                  密码
-                  <input
-                    type="password"
-                    value={gogoaisLogin.password}
-                    onChange={(event) =>
-                      setGogoaisLogin({ ...gogoaisLogin, password: event.target.value })
-                    }
-                    placeholder="gogoais 密码"
-                    autoComplete="current-password"
-                  />
-                </label>
+              <div className="proxy-tabs" role="tablist" aria-label="中转设置">
                 <button
-                  className="ghost fetch-key-button"
+                  className={`proxy-tab ${proxyTab === "login" ? "selected" : ""} ${
+                    gogoaisLoggedIn ? "logged-in" : "pending"
+                  }`}
                   type="button"
-                  onClick={fetchGogoaisCodexKey}
-                  disabled={!!busy || !gogoaisLogin.username.trim() || !gogoaisLogin.password.trim()}
+                  role="tab"
+                  aria-selected={proxyTab === "login"}
+                  onClick={() => setProxyTab("login")}
                 >
-                  {busy === "fetch-gogoais-key" ? <Loader2 className="spin" /> : <KeyRound />}
-                  获取并填入
+                  {gogoaisLoggedIn ? <CheckCircle2 /> : <AlertTriangle />}
+                  {gogoaisLoggedIn ? "已登录" : "待登录"}
+                </button>
+                <button
+                  className={proxyTab === "config" ? "proxy-tab selected" : "proxy-tab"}
+                  type="button"
+                  role="tab"
+                  aria-selected={proxyTab === "config"}
+                  onClick={() => setProxyTab("config")}
+                >
+                  <Settings2 />
+                  中转配置
                 </button>
               </div>
-              <label>
-                API Key{proxyForm.codex_system === "account" ? "（无登录态时兜底）" : ""}
-                <input
-                  type="password"
-                  value={proxyForm.api_key}
-                  onChange={(event) => setProxyForm({ ...proxyForm, api_key: event.target.value })}
-                  placeholder={proxyForm.codex_system === "account" ? "可留空，优先使用当前账号登录态" : "sk-..."}
-                />
-              </label>
-              <div className="two-col">
-                <label>
-                  模型
-                  <input
-                    value={proxyForm.model}
-                    onChange={(event) => setProxyForm({ ...proxyForm, model: event.target.value })}
-                  />
-                </label>
-                <label>
-                  Review 模型
-                  <input
-                    value={proxyForm.review_model}
-                    onChange={(event) => setProxyForm({ ...proxyForm, review_model: event.target.value })}
-                  />
-                </label>
-              </div>
-              <label>
-                推理强度
-                <select
-                  value={proxyForm.reasoning_effort}
-                  onChange={(event) => setProxyForm({ ...proxyForm, reasoning_effort: event.target.value })}
-                >
-                  <option value="minimal">minimal</option>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="xhigh">xhigh</option>
-                </select>
-              </label>
-              <button className="primary" disabled={!!busy}>
-                {busy === "proxy" ? <Loader2 className="spin" /> : <Zap />}
-                保存中转档案
-              </button>
+
+              {proxyTab === "login" ? (
+                <div className="key-fetch-panel">
+                  <label>
+                    账号
+                    <input
+                      value={gogoaisLogin.username}
+                      onChange={(event) => {
+                        setGogoaisLogin({ ...gogoaisLogin, username: event.target.value });
+                        setGogoaisLoggedIn(false);
+                      }}
+                      placeholder="邮箱或用户名"
+                      autoComplete="username"
+                    />
+                  </label>
+                  <label>
+                    密码
+                    <input
+                      type="password"
+                      value={gogoaisLogin.password}
+                      onChange={(event) => {
+                        setGogoaisLogin({ ...gogoaisLogin, password: event.target.value });
+                        setGogoaisLoggedIn(false);
+                      }}
+                      placeholder="密码"
+                      autoComplete="current-password"
+                    />
+                  </label>
+                  <button
+                    className="primary fetch-key-button"
+                    type="button"
+                    onClick={fetchGogoaisCodexKey}
+                    disabled={!!busy || !gogoaisLogin.username.trim() || !gogoaisLogin.password.trim()}
+                  >
+                    {busy === "fetch-gogoais-key" ? <Loader2 className="spin" /> : <KeyRound />}
+                    获取并填入
+                  </button>
+                </div>
+              ) : (
+                <div className="proxy-config-panel">
+                  <label>
+                    档案名称
+                    <input
+                      value={proxyForm.name}
+                      onChange={(event) => setProxyForm({ ...proxyForm, name: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    Base URL
+                    <input
+                      value={proxyForm.base_url}
+                      onChange={(event) => setProxyForm({ ...proxyForm, base_url: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    认证方式
+                    <select
+                      value={proxyForm.codex_system}
+                      onChange={(event) =>
+                        setProxyForm({ ...proxyForm, codex_system: event.target.value as CodexSystem })
+                      }
+                    >
+                      <option value="account">沿用 ChatGPT 登录态，API Key 兜底</option>
+                      <option value="api">只用 API Key</option>
+                    </select>
+                  </label>
+                  <p className="field-hint">
+                    沿用登录态会保留当前 ChatGPT token，并把中转 Base URL 写进 config；只用 API Key 会写入 OPENAI_API_KEY。
+                  </p>
+                  <label>
+                    API Key{proxyForm.codex_system === "account" ? "（无登录态时兜底）" : ""}
+                    <input
+                      type="password"
+                      value={proxyForm.api_key}
+                      onChange={(event) => setProxyForm({ ...proxyForm, api_key: event.target.value })}
+                      placeholder={proxyForm.codex_system === "account" ? "可留空，优先使用当前账号登录态" : "sk-..."}
+                    />
+                  </label>
+                  <div className="two-col">
+                    <label>
+                      模型
+                      <input
+                        value={proxyForm.model}
+                        onChange={(event) => setProxyForm({ ...proxyForm, model: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      Review 模型
+                      <input
+                        value={proxyForm.review_model}
+                        onChange={(event) => setProxyForm({ ...proxyForm, review_model: event.target.value })}
+                      />
+                    </label>
+                  </div>
+                  <label>
+                    推理强度
+                    <select
+                      value={proxyForm.reasoning_effort}
+                      onChange={(event) => setProxyForm({ ...proxyForm, reasoning_effort: event.target.value })}
+                    >
+                      <option value="minimal">minimal</option>
+                      <option value="low">low</option>
+                      <option value="medium">medium</option>
+                      <option value="high">high</option>
+                      <option value="xhigh">xhigh</option>
+                    </select>
+                  </label>
+                </div>
+              )}
+              {proxyTab === "config" && (
+                <button className="primary" disabled={!!busy}>
+                  {busy === "proxy" ? <Loader2 className="spin" /> : <Zap />}
+                  保存中转档案
+                </button>
+              )}
             </form>
           )}
         </aside>

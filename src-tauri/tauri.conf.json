@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Codex Account Switcher",
+  "version": "0.1.0",
+  "identifier": "com.local.codex-account-switcher",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Codex Account Switcher",
+        "width": 1120,
+        "height": 760,
+        "minWidth": 920,
+        "minHeight": 640
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": []
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc5QTQ2OEVFMzlCMTk5NzcKUldSM21iRTU3bWlrZVI2WGxJb2ZnZE9Ic2lmenF2L2grSnNYTC9ndlRBZ3k5ZFNTanpKd1hjM00K",
+      "endpoints": [
+        "https://github.com/FerryboatSeranade/codex-account-switcher/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

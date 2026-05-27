@@ -1,0 +1,30 @@
+[package]
+name = "codex-account-switcher"
+version = "0.1.0"
+description = "A desktop app for switching Codex login profiles."
+authors = ["Codex"]
+edition = "2021"
+
+[lib]
+name = "codex_account_switcher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+thiserror = "2"
+toml_edit = "0.23"
+uuid = { version = "1", features = ["v4", "serde"] }
+tauri-plugin-process = "2"
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"

@@ -1748,7 +1748,7 @@ fn delete_profile(id: String) -> Result<AppState, String> {
     get_app_state()
 }
 
-fn open_path_with_system(path: &Path) -> Result<(), String> {
+fn open_path_with_system(path: &Path, label: &str) -> Result<(), String> {
     if !path.exists() {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -1767,19 +1767,16 @@ fn open_path_with_system(path: &Path) -> Result<(), String> {
         if status.success() {
             return Ok(());
         }
-        return Err("未能通过 open 打开 config.toml".to_string());
+        return Err(format!("未能通过 open 打开 {label}"));
     }
 
     #[cfg(target_os = "windows")]
     {
-        let status = Command::new("cmd")
-            .args(["/C", "start", "", &path.to_string_lossy()])
-            .status()
-            .map_err(|err| format!("打开文件失败：{}", err))?;
-        if status.success() {
-            return Ok(());
-        }
-        return Err("未能通过系统默认程序打开 config.toml".to_string());
+        Command::new("notepad.exe")
+            .arg(path)
+            .spawn()
+            .map_err(|err| format!("通过 notepad.exe 打开 {label} 失败：{err}"))?;
+        return Ok(());
     }
 
     #[cfg(target_os = "linux")]
@@ -1791,18 +1788,26 @@ fn open_path_with_system(path: &Path) -> Result<(), String> {
         if status.success() {
             return Ok(());
         }
-        return Err("未能通过 xdg-open 打开 config.toml".to_string());
+        return Err(format!("未能通过 xdg-open 打开 {label}"));
     }
 
     #[allow(unreachable_code)]
-    Err("当前系统暂不支持打开 config.toml".to_string())
+    Err(format!("当前系统暂不支持打开 {label}"))
+}
+
+#[tauri::command]
+fn open_codex_file(name: String) -> Result<String, String> {
+    if name != "config.toml" && name != "auth.json" {
+        return Err("只能打开 config.toml 或 auth.json".to_string());
+    }
+    let path = codex_dir()?.join(&name);
+    open_path_with_system(&path, &name)?;
+    Ok(format!("已打开 {}", path.to_string_lossy()))
 }
 
 #[tauri::command]
 fn open_codex_config() -> Result<String, String> {
-    let path = codex_dir()?.join("config.toml");
-    open_path_with_system(&path)?;
-    Ok(format!("已打开 {}", path.to_string_lossy()))
+    open_codex_file("config.toml".to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -2362,6 +2367,7 @@ pub fn run() {
             delete_profile,
             clear_codex_state,
             delete_codex_file,
+            open_codex_file,
             open_codex_config,
             detect_codex_environment,
             detect_system_network,

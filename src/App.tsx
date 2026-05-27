@@ -177,7 +177,7 @@ const probeStatusLabel: Record<SystemProbeStatus, string> = {
   error: "失败"
 };
 
-const appBuildLabel = "v0.1.3-windows-admin";
+const appBuildLabel = "v0.1.4-notepad-open";
 
 function needsAdminRestart(detail: string) {
   return (
@@ -543,19 +543,20 @@ function App() {
     }
   }
 
-  async function openConfigToml() {
+  async function openCodexFile(name: "config.toml" | "auth.json") {
     setError("");
     setNotice("");
     setLastAction(null);
     clearProbeReport();
-    setBusy("open-config");
+    const action = `open-${name}`;
+    setBusy(action);
     try {
       if (!isTauriRuntime()) {
-        throw new Error("请在 Tauri 桌面窗口中打开 config.toml");
+        throw new Error(`请在 Tauri 桌面窗口中打开 ${name}`);
       }
-      const message = await invoke<string>("open_codex_config");
+      const message = await invoke<string>("open_codex_file", { name });
       setNotice(message);
-      setLastAction({ kind: "success", title: "已打开 config.toml", detail: message });
+      setLastAction({ kind: "success", title: `已打开 ${name}`, detail: message });
     } catch (err) {
       setError(String(err));
       setLastAction({ kind: "error", title: "打开失败", detail: String(err) });
@@ -930,9 +931,13 @@ function App() {
                 {busy === "reset-account" ? <Loader2 className="spin" /> : <Trash2 />}
                 重置账号状态
               </button>
-              <button className="ghost reset-account" onClick={openConfigToml} disabled={!!busy}>
-                {busy === "open-config" ? <Loader2 className="spin" /> : <FileText />}
+              <button className="ghost reset-account" onClick={() => openCodexFile("config.toml")} disabled={!!busy}>
+                {busy === "open-config.toml" ? <Loader2 className="spin" /> : <FileText />}
                 打开 config.toml
+              </button>
+              <button className="ghost reset-account" onClick={() => openCodexFile("auth.json")} disabled={!!busy}>
+                {busy === "open-auth.json" ? <Loader2 className="spin" /> : <FileKey2 />}
+                打开 auth.json
               </button>
             </div>
             {lastAction && (

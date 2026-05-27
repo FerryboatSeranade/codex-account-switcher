@@ -6,8 +6,10 @@ import {
   ChevronDown,
   CheckCircle2,
   Clock3,
+  ExternalLink,
   FileText,
   FileKey2,
+  Globe2,
   KeyRound,
   Loader2,
   Plus,
@@ -117,6 +119,28 @@ type UpdateState = {
   progress?: string;
 };
 
+type HostsEntry = {
+  line_number: number;
+  ip: string;
+  names: string[];
+  managed: boolean;
+  comment?: string;
+};
+
+type HostsState = {
+  path: string;
+  exists: boolean;
+  entries: HostsEntry[];
+  managed_entries: HostsEntry[];
+};
+
+type HostsWriteResult = {
+  message: string;
+  backup_dir?: string;
+  dns_flush_message?: string;
+  hosts_state: HostsState;
+};
+
 type ImportForm = {
   name: string;
   kind: ProfileKind;
@@ -137,6 +161,13 @@ type ProxyForm = {
 type GogoaisLoginForm = {
   username: string;
   password: string;
+};
+
+type HostsForm = {
+  ip: string;
+  hostname: string;
+  aliases: string;
+  comment: string;
 };
 
 type GogoaisCodexKeyResult = {
@@ -160,6 +191,13 @@ const defaultProxyForm: ProxyForm = {
   codex_system: "account"
 };
 
+const defaultHostsForm: HostsForm = {
+  ip: "127.0.0.1",
+  hostname: "",
+  aliases: "",
+  comment: ""
+};
+
 const kindLabel: Record<ProfileKind, string> = {
   chat_gpt_login: "Plus/Pro 登录",
   proxy_api_key: "中转 API Key",
@@ -177,12 +215,13 @@ const probeStatusLabel: Record<SystemProbeStatus, string> = {
   error: "失败"
 };
 
-const appBuildLabel = "v0.1.5-windows-hardening";
+const appBuildLabel = "v0.1.6-hosts-mapping";
 
 function needsAdminRestart(detail: string) {
   return (
     detail.includes("以管理员身份重启切号器") ||
     detail.includes("Windows 拒绝当前切号器") ||
+    detail.includes("Windows 拒绝写入 hosts") ||
     detail.includes("拒绝访问")
   );
 }
@@ -293,6 +332,10 @@ function isTauriRuntime() {
   return "__TAURI_INTERNALS__" in window;
 }
 
+function formatHostsEntry(entry: HostsEntry) {
+  return `${entry.ip} ${entry.names.join(" ")}`;
+}
+
 function previewState(): AppState {
   return {
     current: {
@@ -329,12 +372,15 @@ function App() {
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
   const [downloadedBytes, setDownloadedBytes] = useState(0);
   const [downloadTotal, setDownloadTotal] = useState<number | null>(null);
+  const [hostsState, setHostsState] = useState<HostsState | null>(null);
+  const [hostsExpanded, setHostsExpanded] = useState(false);
   const [importForm, setImportForm] = useState<ImportForm>({
     name: "我的 Plus/Pro 账号",
     kind: "chat_gpt_login",
     notes: ""
   });
   const [proxyForm, setProxyForm] = useState<ProxyForm>(defaultProxyForm);
+  const [hostsForm, setHostsForm] = useState<HostsForm>(defaultHostsForm);
   const [gogoaisLogin, setGogoaisLogin] = useState<GogoaisLoginForm>({
     username: "",
     password: ""
@@ -362,6 +408,16 @@ function App() {
         return;
       }
       setState(await invoke<AppState>("get_app_state"));
+      try {
+        setHostsState(await invoke<HostsState>("get_hosts_state"));
+      } catch (hostsErr) {
+        setHostsState(null);
+        setLastAction({
+          kind: "error",
+          title: "hosts 状态读取失败",
+          detail: String(hostsErr)
+        });
+      }
     } catch (err) {
       setError(String(err));
     } finally {
@@ -560,6 +616,127 @@ function App() {
     } catch (err) {
       setError(String(err));
       setLastAction({ kind: "error", title: "打开失败", detail: String(err) });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function refreshHostsState() {
+    setError("");
+    setNotice("");
+    setLastAction(null);
+    clearProbeReport();
+    setBusy("hosts-refresh");
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("请在 Tauri 桌面窗口中读取 hosts");
+      }
+      const result = await invoke<HostsState>("get_hosts_state");
+      setHostsState(result);
+      const detail = `已读取 hosts：${result.path}`;
+      setNotice(detail);
+      setLastAction({ kind: "success", title: "hosts 已刷新", detail });
+    } catch (err) {
+      const detail = String(err);
+      setError(detail);
+      setLastAction({ kind: "error", title: "读取 hosts 失败", detail });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function openHostsFile() {
+    setError("");
+    setNotice("");
+    setLastAction(null);
+    clearProbeReport();
+    setBusy("open-hosts");
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("请在 Tauri 桌面窗口中打开 hosts");
+      }
+      const message = await invoke<string>("open_hosts_file");
+      setNotice(message);
+      setLastAction({ kind: "success", title: "已打开 hosts", detail: message });
+    } catch (err) {
+      const detail = String(err);
+      setError(detail);
+      setLastAction({ kind: "error", title: "打开 hosts 失败", detail });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function applyHostsResult(result: HostsWriteResult, successTitle: string) {
+    setHostsState(result.hosts_state);
+    const detail = [
+      result.message,
+      result.backup_dir ? `备份：${result.backup_dir}` : "",
+      result.dns_flush_message ?? ""
+    ]
+      .filter(Boolean)
+      .join(" ");
+    setNotice(detail);
+    setLastAction({ kind: "success", title: successTitle, detail });
+  }
+
+  async function submitHostsMapping(event: FormEvent) {
+    event.preventDefault();
+    setError("");
+    setNotice("");
+    setLastAction(null);
+    clearProbeReport();
+    setBusy("hosts-save");
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("请在 Tauri 桌面窗口中写入 hosts");
+      }
+      const result = await invoke<HostsWriteResult>("upsert_hosts_mapping", {
+        input: hostsForm
+      });
+      applyHostsResult(result, "hosts 映射已保存");
+      setHostsExpanded(true);
+      setHostsForm((current) => ({
+        ...current,
+        hostname: "",
+        aliases: "",
+        comment: ""
+      }));
+    } catch (err) {
+      const detail = String(err);
+      setError(detail);
+      setLastAction({
+        kind: "error",
+        title: "写入 hosts 失败",
+        detail,
+        action: needsAdminRestart(detail) ? "restart-admin" : undefined
+      });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function deleteHostsEntry(hostname: string) {
+    setError("");
+    setNotice("");
+    setLastAction(null);
+    clearProbeReport();
+    setBusy(`hosts-delete-${hostname}`);
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("请在 Tauri 桌面窗口中删除 hosts 映射");
+      }
+      const result = await invoke<HostsWriteResult>("delete_hosts_mapping", { hostname });
+      applyHostsResult(result, "hosts 映射已删除");
+    } catch (err) {
+      const detail = String(err);
+      setError(detail);
+      setLastAction({
+        kind: "error",
+        title: "删除 hosts 映射失败",
+        detail,
+        action: needsAdminRestart(detail) ? "restart-admin" : undefined
+      });
     } finally {
       setBusy("");
     }
@@ -955,6 +1132,102 @@ function App() {
                     以管理员身份重启切号器
                   </button>
                 )}
+              </div>
+            )}
+          </div>
+
+          <div className="hosts-block">
+            <div className="status-title">
+              <Globe2 />
+              <span>本地 DNS hosts</span>
+            </div>
+            <button
+              className="hosts-summary"
+              type="button"
+              onClick={() => setHostsExpanded((expanded) => !expanded)}
+              aria-expanded={hostsExpanded}
+              title="展开/折叠 hosts 映射"
+            >
+              <span>{hostsState?.managed_entries.length ?? 0} 条映射</span>
+              <ChevronDown className={hostsExpanded ? "expanded" : ""} />
+            </button>
+            {hostsExpanded && (
+              <div className="hosts-content">
+                <div className="hosts-path-row">
+                  <span className="path">{hostsState?.path ?? "读取中"}</span>
+                  <button className="ghost mini-button" type="button" onClick={openHostsFile} disabled={!!busy}>
+                    {busy === "open-hosts" ? <Loader2 className="spin" /> : <ExternalLink />}
+                    打开
+                  </button>
+                  <button className="ghost mini-button" type="button" onClick={refreshHostsState} disabled={!!busy}>
+                    {busy === "hosts-refresh" ? <Loader2 className="spin" /> : <RefreshCw />}
+                    刷新
+                  </button>
+                </div>
+                <form className="hosts-form" onSubmit={submitHostsMapping}>
+                  <div className="two-col">
+                    <label>
+                      IP
+                      <input
+                        value={hostsForm.ip}
+                        onChange={(event) => setHostsForm({ ...hostsForm, ip: event.target.value })}
+                        placeholder="127.0.0.1"
+                      />
+                    </label>
+                    <label>
+                      域名
+                      <input
+                        value={hostsForm.hostname}
+                        onChange={(event) =>
+                          setHostsForm({ ...hostsForm, hostname: event.target.value })
+                        }
+                        placeholder="example.local"
+                      />
+                    </label>
+                  </div>
+                  <label>
+                    别名
+                    <input
+                      value={hostsForm.aliases}
+                      onChange={(event) => setHostsForm({ ...hostsForm, aliases: event.target.value })}
+                      placeholder="api.example.local cdn.example.local"
+                    />
+                  </label>
+                  <label>
+                    备注
+                    <input
+                      value={hostsForm.comment}
+                      onChange={(event) => setHostsForm({ ...hostsForm, comment: event.target.value })}
+                      placeholder="本地调试"
+                    />
+                  </label>
+                  <button
+                    className="primary"
+                    disabled={!!busy || !hostsForm.ip.trim() || !hostsForm.hostname.trim()}
+                  >
+                    {busy === "hosts-save" ? <Loader2 className="spin" /> : <Globe2 />}
+                    保存 hosts 映射
+                  </button>
+                </form>
+                <div className="hosts-list">
+                  {hostsState?.managed_entries.map((entry) => (
+                    <div className="hosts-entry" key={`${entry.line_number}-${entry.ip}-${entry.names.join("-")}`}>
+                      <span>{formatHostsEntry(entry)}</span>
+                      <button
+                        className="danger"
+                        type="button"
+                        onClick={() => deleteHostsEntry(entry.names[0])}
+                        disabled={!!busy}
+                        title="删除 hosts 映射"
+                      >
+                        {busy === `hosts-delete-${entry.names[0]}` ? <Loader2 className="spin" /> : <Trash2 />}
+                      </button>
+                    </div>
+                  ))}
+                  {hostsState && hostsState.managed_entries.length === 0 && (
+                    <p className="hosts-empty">暂无本工具管理的 hosts 映射</p>
+                  )}
+                </div>
               </div>
             )}
           </div>

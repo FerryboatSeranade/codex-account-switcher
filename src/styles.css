@@ -276,6 +276,15 @@ h3 {
   background: #f7fcfb;
 }
 
+.hosts-block {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #dce3ee;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
 .status-title {
   display: flex;
   gap: 8px;
@@ -285,6 +294,91 @@ h3 {
 
 .status-title svg {
   color: #0f8b7c;
+}
+
+.hosts-summary {
+  display: flex;
+  width: 100%;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: #1c2738;
+  background: #f0f4f8;
+  font-weight: 900;
+}
+
+.hosts-summary svg {
+  color: #647086;
+  transition: transform 160ms ease;
+}
+
+.hosts-summary svg.expanded {
+  transform: rotate(180deg);
+}
+
+.hosts-content,
+.hosts-form,
+.hosts-list {
+  display: grid;
+  gap: 10px;
+}
+
+.hosts-path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border-radius: 8px;
+  background: #f5f7fa;
+}
+
+.hosts-path-row .path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mini-button {
+  min-height: 34px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.hosts-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.hosts-entry span {
+  min-width: 0;
+  color: #1c2738;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.hosts-entry .danger {
+  width: 34px;
+  min-height: 34px;
+}
+
+.hosts-empty {
+  padding: 10px;
+  border-radius: 8px;
+  color: #647086;
+  background: #f5f7fa;
+  font-size: 12px;
+  font-weight: 800;
+  text-align: center;
 }
 
 .active-pill {

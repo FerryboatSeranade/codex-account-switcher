@@ -32,8 +32,10 @@ If `model_provider = "OpenAI"` and `[model_providers.OpenAI].base_url = "https:/
 - `~/.codex/archived_sessions/`: archived rollout JSONL files.
 - `~/.codex/session_index.jsonl`: lightweight active session index.
 - `~/.codex/logs_2.sqlite`: logs, including 401/Unauthorized/INVALID_API_KEY details.
-- `~/Library/Application Support/codex-account-switcher/profiles.json`: saved switcher profiles.
-- `~/Library/Application Support/codex-account-switcher/backups/`: backups made before destructive writes.
+- `~/Library/Application Support/codex-account-switcher/profiles.json`: saved switcher profiles on macOS. Windows uses `%LOCALAPPDATA%\codex-account-switcher\profiles.json`; Linux uses the local data directory.
+- `~/Library/Application Support/codex-account-switcher/backups/`: backups made before destructive writes on macOS. Windows/Linux use the same app-local data directory pattern.
+- `/etc/hosts`: macOS/Linux local DNS override file.
+- `C:\Windows\System32\drivers\etc\hosts`: Windows local DNS override file.
 
 ## Thread Database And Rollout Files
 
@@ -126,6 +128,28 @@ It should:
 
 After reset, Codex will need a fresh ChatGPT login or API key configuration. Saved switcher profiles and shared threads are not deleted by this action.
 
+## Local DNS hosts
+
+The switcher has a `Local DNS hosts` entry for adding fixed host-to-IP mappings.
+
+Behavior:
+
+- macOS/Linux write `/etc/hosts`.
+- Windows writes `C:\Windows\System32\drivers\etc\hosts`.
+- Every write backs up the current hosts file under the switcher's `backups/hosts-<timestamp>/` directory.
+- Entries written by the switcher include the `codex-account-switcher` marker comment.
+- The delete button only removes entries managed by the switcher, not arbitrary manual hosts rows.
+- If the same hostname already exists in a manual hosts row, the switcher refuses to overwrite it and asks the user to open hosts for manual cleanup.
+- After a write, the app attempts to flush the DNS cache: `dscacheutil`/`mDNSResponder` on macOS, `ipconfig /flushdns` on Windows, and common resolver flush commands on Linux.
+
+Permissions:
+
+- macOS may show an administrator prompt when writing hosts.
+- Windows usually requires launching the switcher as administrator before writing hosts.
+- Linux usually requires root/admin permissions, or manual editing with `sudo`.
+
+hosts is exact-name mapping only. It does not support wildcard domains such as `*.example.com`; add each specific hostname that needs the local DNS override.
+
 ## gogoais API Key Fetch
 
 The `New Proxy` form can fetch a Codex proxy API key from gogoais by username and password.
@@ -209,7 +233,7 @@ If the GitHub repository name changes, update both files and the release workflo
 
 1. Bump versions in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
 2. Commit the changes.
-3. Create and push a tag, for example `v0.1.5`.
+3. Create and push a tag, for example `v0.1.6`.
 4. GitHub Actions builds installers, updater archives, signatures, and release metadata.
 5. Review the draft release, then publish it.
 

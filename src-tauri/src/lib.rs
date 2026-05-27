@@ -8,7 +8,8 @@ use std::{
     collections::HashSet,
     env,
     fs::{self, File},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
+    net::IpAddr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -163,6 +164,31 @@ struct DeleteCodexFileResult {
     app_state: AppState,
 }
 
+#[derive(Debug, Serialize, Clone)]
+struct HostsEntry {
+    line_number: usize,
+    ip: String,
+    names: Vec<String>,
+    managed: bool,
+    comment: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct HostsState {
+    path: String,
+    exists: bool,
+    entries: Vec<HostsEntry>,
+    managed_entries: Vec<HostsEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct HostsWriteResult {
+    message: String,
+    backup_dir: Option<String>,
+    dns_flush_message: Option<String>,
+    hosts_state: HostsState,
+}
+
 #[derive(Debug, Serialize)]
 struct RestoreAccountModeResult {
     message: String,
@@ -227,6 +253,14 @@ struct ProxyProfileInput {
 struct GogoaisCodexKeyInput {
     username: String,
     password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HostsMappingInput {
+    ip: String,
+    hostname: String,
+    aliases: Option<String>,
+    comment: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1830,6 +1864,514 @@ fn open_codex_config() -> Result<String, String> {
     open_codex_file("config.toml".to_string())
 }
 
+const HOSTS_MARKER: &str = "codex-account-switcher";
+
+fn hosts_path() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let root = env::var("SystemRoot")
+            .or_else(|_| env::var("WINDIR"))
+            .unwrap_or_else(|_| "C:\\Windows".to_string());
+        return PathBuf::from(root)
+            .join("System32")
+            .join("drivers")
+            .join("etc")
+            .join("hosts");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        PathBuf::from("/etc/hosts")
+    }
+}
+
+fn read_hosts_file(path: &Path) -> Result<String, String> {
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    match fs::read_to_string(path) {
+        Ok(value) => Ok(value),
+        Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+            let bytes =
+                fs::read(path).map_err(|read_err| format!("读取 hosts 文件失败：{read_err}"))?;
+            Ok(String::from_utf8_lossy(&bytes).to_string())
+        }
+        Err(err) => Err(format!("读取 hosts 文件失败：{err}")),
+    }
+}
+
+fn split_hosts_comment(line: &str) -> (&str, Option<&str>) {
+    line.split_once('#')
+        .map(|(code, comment)| (code, Some(comment)))
+        .unwrap_or((line, None))
+}
+
+fn parse_hosts_entries(raw: &str) -> Vec<HostsEntry> {
+    raw.lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let (code, comment) = split_hosts_comment(line);
+            let tokens = code.split_whitespace().collect::<Vec<_>>();
+            if tokens.len() < 2 || tokens[0].parse::<IpAddr>().is_err() {
+                return None;
+            }
+            Some(HostsEntry {
+                line_number: index + 1,
+                ip: tokens[0].to_string(),
+                names: tokens[1..].iter().map(|name| (*name).to_string()).collect(),
+                managed: comment.is_some_and(|value| value.contains(HOSTS_MARKER)),
+                comment: comment.map(|value| value.trim().to_string()),
+            })
+        })
+        .collect()
+}
+
+fn get_hosts_state_from_path(path: &Path) -> Result<HostsState, String> {
+    let raw = read_hosts_file(path)?;
+    let entries = parse_hosts_entries(&raw);
+    let managed_entries = entries
+        .iter()
+        .filter(|entry| entry.managed)
+        .cloned()
+        .collect();
+    Ok(HostsState {
+        path: path.to_string_lossy().to_string(),
+        exists: path.exists(),
+        entries,
+        managed_entries,
+    })
+}
+
+#[tauri::command]
+fn get_hosts_state() -> Result<HostsState, String> {
+    get_hosts_state_from_path(&hosts_path())
+}
+
+fn validate_hosts_ip(value: &str) -> Result<String, String> {
+    let ip = value
+        .trim()
+        .parse::<IpAddr>()
+        .map_err(|_| "请输入有效的 IPv4 或 IPv6 地址".to_string())?;
+    Ok(ip.to_string())
+}
+
+fn validate_hosts_name(value: &str) -> Result<String, String> {
+    let name = value.trim().trim_end_matches('.').to_ascii_lowercase();
+    if name.is_empty() {
+        return Err("域名不能为空".to_string());
+    }
+    if name == "*" || name.contains('*') {
+        return Err("hosts 文件不支持通配符域名，请填写具体域名".to_string());
+    }
+    if name.len() > 253 {
+        return Err("域名过长".to_string());
+    }
+    for label in name.split('.') {
+        if label.is_empty() {
+            return Err("域名格式不正确".to_string());
+        }
+        if label.len() > 63 {
+            return Err("域名单段长度不能超过 63 个字符".to_string());
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err("域名单段不能以连字符开头或结尾".to_string());
+        }
+        if !label
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        {
+            return Err("域名只能包含字母、数字、连字符和点".to_string());
+        }
+    }
+    Ok(name)
+}
+
+fn collect_hosts_names(hostname: &str, aliases: Option<&str>) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    for value in std::iter::once(hostname).chain(
+        aliases
+            .unwrap_or_default()
+            .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';'),
+    ) {
+        if value.trim().is_empty() {
+            continue;
+        }
+        let name = validate_hosts_name(value)?;
+        if seen.insert(name.clone()) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        return Err("至少需要填写一个域名".to_string());
+    }
+    Ok(names)
+}
+
+fn hosts_name_key(value: &str) -> String {
+    value.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn sanitize_hosts_comment(value: Option<&str>) -> String {
+    value
+        .unwrap_or_default()
+        .replace(['\r', '\n', '#'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn hosts_mapping_line(ip: &str, names: &[String], comment: Option<&str>) -> String {
+    let mut marker = HOSTS_MARKER.to_string();
+    let comment = sanitize_hosts_comment(comment);
+    if !comment.is_empty() {
+        marker.push_str(": ");
+        marker.push_str(&comment);
+    }
+    format!("{} {} # {}", ip, names.join(" "), marker)
+}
+
+fn rewrite_hosts_for_upsert(raw: &str, target_names: &HashSet<String>) -> (Vec<String>, usize) {
+    let mut changed = 0;
+    let mut lines = Vec::new();
+    for line in raw.lines() {
+        let (code, comment) = split_hosts_comment(line);
+        let managed = comment.is_some_and(|value| value.contains(HOSTS_MARKER));
+        let tokens = code.split_whitespace().collect::<Vec<_>>();
+        if tokens.len() < 2 || tokens[0].parse::<IpAddr>().is_err() {
+            lines.push(line.to_string());
+            continue;
+        }
+        if !managed {
+            lines.push(line.to_string());
+            continue;
+        }
+
+        let remaining = tokens[1..]
+            .iter()
+            .copied()
+            .filter(|name| !target_names.contains(&hosts_name_key(name)))
+            .collect::<Vec<_>>();
+        if remaining.len() == tokens.len() - 1 {
+            lines.push(line.to_string());
+            continue;
+        }
+
+        changed += 1;
+        if remaining.is_empty() {
+            continue;
+        }
+
+        let mut rewritten = format!("{} {}", tokens[0], remaining.join(" "));
+        if let Some(comment) = comment {
+            rewritten.push_str(" #");
+            rewritten.push_str(comment);
+        }
+        lines.push(rewritten);
+    }
+    (lines, changed)
+}
+
+fn unmanaged_hosts_conflicts(raw: &str, target_names: &HashSet<String>) -> Vec<String> {
+    let mut conflicts = Vec::new();
+    for (index, line) in raw.lines().enumerate() {
+        let (code, comment) = split_hosts_comment(line);
+        if comment.is_some_and(|value| value.contains(HOSTS_MARKER)) {
+            continue;
+        }
+        let tokens = code.split_whitespace().collect::<Vec<_>>();
+        if tokens.len() < 2 || tokens[0].parse::<IpAddr>().is_err() {
+            continue;
+        }
+        let matched = tokens[1..]
+            .iter()
+            .filter(|name| target_names.contains(&hosts_name_key(name)))
+            .copied()
+            .collect::<Vec<_>>();
+        if !matched.is_empty() {
+            conflicts.push(format!(
+                "第 {} 行：{} -> {}",
+                index + 1,
+                tokens[0],
+                matched.join(", ")
+            ));
+        }
+    }
+    conflicts
+}
+
+fn rewrite_hosts_for_delete(raw: &str, target_name: &str) -> (Vec<String>, usize) {
+    let target = hosts_name_key(target_name);
+    let mut changed = 0;
+    let mut lines = Vec::new();
+    for line in raw.lines() {
+        let (code, comment) = split_hosts_comment(line);
+        let managed = comment.is_some_and(|value| value.contains(HOSTS_MARKER));
+        let tokens = code.split_whitespace().collect::<Vec<_>>();
+        if !managed
+            || tokens.len() < 2
+            || tokens[0].parse::<IpAddr>().is_err()
+            || !tokens[1..]
+                .iter()
+                .any(|name| hosts_name_key(name) == target)
+        {
+            lines.push(line.to_string());
+            continue;
+        }
+        changed += 1;
+    }
+    (lines, changed)
+}
+
+fn backup_hosts_file(path: &Path) -> Result<Option<String>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let stamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let backup_dir = app_dir()?.join("backups").join(format!("hosts-{stamp}"));
+    fs::create_dir_all(&backup_dir).map_err(|err| format!("创建 hosts 备份目录失败：{err}"))?;
+    fs::copy(path, backup_dir.join("hosts"))
+        .map_err(|err| format!("备份 hosts 文件失败：{err}"))?;
+    Ok(Some(backup_dir.to_string_lossy().to_string()))
+}
+
+fn hosts_permission_error(action: &str, err: &io::Error) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        format!(
+            "Windows 拒绝{action} hosts 文件。请点击“以管理员身份重启切号器”后重试，或手动用管理员权限编辑 hosts。详细：{err}"
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        format!("macOS 拒绝{action} hosts 文件。请确认系统授权弹窗，或手动用 sudo 编辑 /etc/hosts。详细：{err}")
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        format!("Linux 拒绝{action} hosts 文件。请以 root/admin 权限运行切号器，或手动用 sudo 编辑 /etc/hosts。详细：{err}")
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        format!("当前系统拒绝{action} hosts 文件：{err}")
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn sh_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "macos")]
+fn apple_double_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(target_os = "macos")]
+fn write_hosts_file_elevated(path: &Path, text: &str) -> Result<(), String> {
+    let temp_dir = app_dir()?.join("hosts-write");
+    fs::create_dir_all(&temp_dir).map_err(|err| format!("创建临时目录失败：{err}"))?;
+    let temp_path = temp_dir.join("hosts.tmp");
+    fs::write(&temp_path, text).map_err(|err| format!("写入 hosts 临时文件失败：{err}"))?;
+    let shell_command = format!(
+        "cp {} {} && chmod 644 {}",
+        sh_single_quote(&temp_path.to_string_lossy()),
+        sh_single_quote(&path.to_string_lossy()),
+        sh_single_quote(&path.to_string_lossy())
+    );
+    let script = format!(
+        "do shell script {} with administrator privileges",
+        apple_double_quote(&shell_command)
+    );
+    let output = Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .map_err(|err| format!("请求 macOS 管理员权限失败：{err}"))?;
+    let _ = fs::remove_file(&temp_path);
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = command_output_text(&output.stderr);
+        Err(if stderr.is_empty() {
+            "macOS 管理员写入 hosts 被取消或失败".to_string()
+        } else {
+            format!("macOS 管理员写入 hosts 失败：{stderr}")
+        })
+    }
+}
+
+fn write_hosts_file(path: &Path, text: &str) -> Result<(), String> {
+    match fs::write(path, text) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            #[cfg(target_os = "macos")]
+            {
+                write_hosts_file_elevated(path, text).map_err(|elevated_err| {
+                    format!("{}；{elevated_err}", hosts_permission_error("写入", &err))
+                })
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err(hosts_permission_error("写入", &err))
+            }
+        }
+        Err(err) => Err(format!("写入 hosts 文件失败：{err}")),
+    }
+}
+
+fn hosts_line_ending(raw: &str) -> &'static str {
+    if raw.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+fn compose_hosts_text(
+    mut lines: Vec<String>,
+    line_ending: &str,
+    new_line: Option<String>,
+) -> String {
+    if let Some(new_line) = new_line {
+        let has_marker = lines.iter().any(|line| line.contains(HOSTS_MARKER));
+        if !lines.is_empty() && lines.last().is_some_and(|line| !line.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        if !has_marker {
+            lines.push(format!("# {HOSTS_MARKER} managed hosts"));
+        }
+        lines.push(new_line);
+    }
+    let mut text = lines.join(line_ending);
+    if !text.ends_with(line_ending) {
+        text.push_str(line_ending);
+    }
+    text
+}
+
+fn flush_dns_cache() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        return match command_stdout("ipconfig", &["/flushdns"]) {
+            Ok(_) => "已刷新 Windows DNS 缓存".to_string(),
+            Err(err) => format!("hosts 已写入，但刷新 Windows DNS 缓存失败：{err}"),
+        };
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let dscache_ok = Command::new("dscacheutil")
+            .arg("-flushcache")
+            .status()
+            .is_ok_and(|status| status.success());
+        let mdns_ok = Command::new("killall")
+            .args(["-HUP", "mDNSResponder"])
+            .status()
+            .is_ok_and(|status| status.success());
+        return if dscache_ok || mdns_ok {
+            "已尝试刷新 macOS DNS 缓存".to_string()
+        } else {
+            "hosts 已写入，但刷新 macOS DNS 缓存命令未成功；重启 Codex 或浏览器后通常会生效"
+                .to_string()
+        };
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        for (program, args) in [
+            ("resolvectl", vec!["flush-caches"]),
+            ("systemd-resolve", vec!["--flush-caches"]),
+            ("nscd", vec!["-i", "hosts"]),
+        ] {
+            if Command::new(program)
+                .args(args)
+                .status()
+                .is_ok_and(|status| status.success())
+            {
+                return format!("已尝试通过 {program} 刷新 DNS 缓存");
+            }
+        }
+        "hosts 已写入，但未找到可用的 Linux DNS 缓存刷新命令；重启 Codex 或相关网络服务后通常会生效"
+            .to_string()
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        "hosts 已写入；当前系统暂不支持自动刷新 DNS 缓存".to_string()
+    }
+}
+
+#[tauri::command]
+fn upsert_hosts_mapping(input: HostsMappingInput) -> Result<HostsWriteResult, String> {
+    let ip = validate_hosts_ip(&input.ip)?;
+    let names = collect_hosts_names(&input.hostname, input.aliases.as_deref())?;
+    let target_names = names.iter().map(|name| hosts_name_key(name)).collect();
+    let path = hosts_path();
+    let raw = read_hosts_file(&path)?;
+    let line_ending = hosts_line_ending(&raw);
+    let conflicts = unmanaged_hosts_conflicts(&raw, &target_names);
+    if !conflicts.is_empty() {
+        return Err(format!(
+            "hosts 中已存在同域名的手动映射，本工具不会自动改写非托管行。请点击“打开”手动处理后再保存。冲突：{}",
+            conflicts.join("；")
+        ));
+    }
+    let (lines, touched_lines) = rewrite_hosts_for_upsert(&raw, &target_names);
+    let new_line = hosts_mapping_line(&ip, &names, input.comment.as_deref());
+    let new_text = compose_hosts_text(lines, line_ending, Some(new_line));
+    let backup_dir = backup_hosts_file(&path)?;
+    write_hosts_file(&path, &new_text)?;
+    let dns_flush_message = Some(flush_dns_cache());
+    let message = if touched_lines > 0 {
+        format!("已更新 hosts 映射：{} -> {}", names.join(", "), ip)
+    } else {
+        format!("已添加 hosts 映射：{} -> {}", names.join(", "), ip)
+    };
+    Ok(HostsWriteResult {
+        message,
+        backup_dir,
+        dns_flush_message,
+        hosts_state: get_hosts_state_from_path(&path)?,
+    })
+}
+
+#[tauri::command]
+fn delete_hosts_mapping(hostname: String) -> Result<HostsWriteResult, String> {
+    let hostname = validate_hosts_name(&hostname)?;
+    let path = hosts_path();
+    let raw = read_hosts_file(&path)?;
+    let line_ending = hosts_line_ending(&raw);
+    let (lines, removed_count) = rewrite_hosts_for_delete(&raw, &hostname);
+    if removed_count == 0 {
+        return Ok(HostsWriteResult {
+            message: format!("没有找到本工具管理的 hosts 映射：{hostname}"),
+            backup_dir: None,
+            dns_flush_message: None,
+            hosts_state: get_hosts_state_from_path(&path)?,
+        });
+    }
+    let new_text = compose_hosts_text(lines, line_ending, None);
+    let backup_dir = backup_hosts_file(&path)?;
+    write_hosts_file(&path, &new_text)?;
+    let dns_flush_message = Some(flush_dns_cache());
+    Ok(HostsWriteResult {
+        message: format!("已删除本工具管理的 hosts 映射：{hostname}"),
+        backup_dir,
+        dns_flush_message,
+        hosts_state: get_hosts_state_from_path(&path)?,
+    })
+}
+
+#[tauri::command]
+fn open_hosts_file() -> Result<String, String> {
+    let path = hosts_path();
+    open_path_with_system(&path, "hosts")?;
+    Ok(format!("已打开 {}", path.to_string_lossy()))
+}
+
 #[cfg(target_os = "macos")]
 fn detect_system_proxy() -> SystemProbeCheck {
     let services = command_stdout("networksetup", &["-listallnetworkservices"]).unwrap_or_default();
@@ -2384,6 +2926,10 @@ pub fn run() {
             delete_codex_file,
             open_codex_file,
             open_codex_config,
+            get_hosts_state,
+            upsert_hosts_mapping,
+            delete_hosts_mapping,
+            open_hosts_file,
             detect_codex_environment,
             detect_system_network,
             copy_text_to_clipboard,
@@ -2393,4 +2939,49 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn name_set(values: &[&str]) -> HashSet<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_managed_hosts_entries() {
+        let raw =
+            "127.0.0.1 localhost\n10.0.0.2 api.local app.local # codex-account-switcher: test\n";
+        let entries = parse_hosts_entries(raw);
+        assert_eq!(entries.len(), 2);
+        assert!(!entries[0].managed);
+        assert!(entries[1].managed);
+        assert_eq!(entries[1].names, vec!["api.local", "app.local"]);
+    }
+
+    #[test]
+    fn upsert_only_rewrites_managed_rows() {
+        let raw = "10.0.0.1 manual.local\n10.0.0.2 old.local api.local # codex-account-switcher\n";
+        let (lines, touched) = rewrite_hosts_for_upsert(raw, &name_set(&["api.local"]));
+        assert_eq!(touched, 1);
+        assert_eq!(lines[0], "10.0.0.1 manual.local");
+        assert_eq!(lines[1], "10.0.0.2 old.local # codex-account-switcher");
+    }
+
+    #[test]
+    fn detects_unmanaged_conflicts() {
+        let raw = "10.0.0.1 api.local\n10.0.0.2 api.local # codex-account-switcher\n";
+        let conflicts = unmanaged_hosts_conflicts(raw, &name_set(&["api.local"]));
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].contains("第 1 行"));
+    }
+
+    #[test]
+    fn delete_only_removes_managed_rows() {
+        let raw = "10.0.0.1 api.local\n10.0.0.2 api.local # codex-account-switcher\n";
+        let (lines, removed) = rewrite_hosts_for_delete(raw, "api.local");
+        assert_eq!(removed, 1);
+        assert_eq!(lines, vec!["10.0.0.1 api.local"]);
+    }
 }

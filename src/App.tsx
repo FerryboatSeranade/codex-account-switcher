@@ -105,6 +105,7 @@ type ActionFeedback = {
   kind: "success" | "info" | "error";
   title: string;
   detail: string;
+  action?: "restart-admin";
 };
 
 type UpdateState = {
@@ -176,7 +177,15 @@ const probeStatusLabel: Record<SystemProbeStatus, string> = {
   error: "失败"
 };
 
-const appBuildLabel = "v0.1.2-windows-process";
+const appBuildLabel = "v0.1.3-windows-admin";
+
+function needsAdminRestart(detail: string) {
+  return (
+    detail.includes("以管理员身份重启切号器") ||
+    detail.includes("Windows 拒绝当前切号器") ||
+    detail.includes("拒绝访问")
+  );
+}
 
 function formatSystemProbeReport(report: SystemProbeReport) {
   const lines = [
@@ -471,8 +480,14 @@ function App() {
       setNotice(message);
       setLastAction({ kind: "success", title: "已重启 Codex", detail: message });
     } catch (err) {
-      setError(String(err));
-      setLastAction({ kind: "error", title: "重启失败", detail: String(err) });
+      const detail = String(err);
+      setError(detail);
+      setLastAction({
+        kind: "error",
+        title: "重启失败",
+        detail,
+        action: needsAdminRestart(detail) ? "restart-admin" : undefined
+      });
     } finally {
       setBusy("");
     }
@@ -492,8 +507,37 @@ function App() {
       setNotice(message);
       setLastAction({ kind: "success", title: "已关闭 Codex", detail: message });
     } catch (err) {
-      setError(String(err));
-      setLastAction({ kind: "error", title: "关闭失败", detail: String(err) });
+      const detail = String(err);
+      setError(detail);
+      setLastAction({
+        kind: "error",
+        title: "关闭失败",
+        detail,
+        action: needsAdminRestart(detail) ? "restart-admin" : undefined
+      });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function restartSwitcherAsAdmin() {
+    setError("");
+    setNotice("正在请求 Windows 管理员权限...");
+    setBusy("restart-admin");
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("请在 Tauri 桌面窗口中以管理员身份重启切号器");
+      }
+      await invoke<string>("restart_switcher_as_admin");
+      setLastAction({
+        kind: "info",
+        title: "等待管理员确认",
+        detail: "如果 Windows 弹出 UAC，请确认后在管理员窗口里重试关闭 Codex 或重置账号状态。"
+      });
+    } catch (err) {
+      const detail = String(err);
+      setError(detail);
+      setLastAction({ kind: "error", title: "管理员重启失败", detail });
     } finally {
       setBusy("");
     }
@@ -715,8 +759,14 @@ function App() {
           : result.message
       });
     } catch (err) {
-      setError(String(err));
-      setLastAction({ kind: "error", title: "重置失败", detail: String(err) });
+      const detail = String(err);
+      setError(detail);
+      setLastAction({
+        kind: "error",
+        title: "重置失败",
+        detail,
+        action: needsAdminRestart(detail) ? "restart-admin" : undefined
+      });
     } finally {
       setBusy("");
     }
@@ -889,6 +939,17 @@ function App() {
               <div className={`action-feedback ${lastAction.kind}`} role="status">
                 <strong>{lastAction.title}</strong>
                 <p>{lastAction.detail}</p>
+                {lastAction.action === "restart-admin" && (
+                  <button
+                    className="primary action-feedback-button"
+                    type="button"
+                    onClick={restartSwitcherAsAdmin}
+                    disabled={!!busy}
+                  >
+                    {busy === "restart-admin" ? <Loader2 className="spin" /> : <ShieldCheck />}
+                    以管理员身份重启切号器
+                  </button>
+                )}
               </div>
             )}
           </div>

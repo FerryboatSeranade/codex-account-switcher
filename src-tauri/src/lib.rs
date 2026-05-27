@@ -1,5 +1,7 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
+#[cfg(target_os = "windows")]
+use encoding_rs::GBK;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -736,34 +738,123 @@ fn command_stdout(program: &str, args: &[&str]) -> Result<String, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn command_status_detail(program: &str, args: &[&str]) -> Result<(), String> {
+struct WindowsCommandError {
+    program: String,
+    status: String,
+    stdout: String,
+    stderr: String,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsCommandError {
+    fn detail(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.stdout.trim().is_empty() {
+            parts.push(format!(
+                "stdout: {}",
+                first_non_empty_lines(&self.stdout, 4)
+            ));
+        }
+        if !self.stderr.trim().is_empty() {
+            parts.push(format!(
+                "stderr: {}",
+                first_non_empty_lines(&self.stderr, 4)
+            ));
+        }
+        if parts.is_empty() {
+            format!("{} 退出码异常：{}", self.program, self.status)
+        } else {
+            format!(
+                "{} 退出码异常：{}；{}",
+                self.program,
+                self.status,
+                parts.join("；")
+            )
+        }
+    }
+
+    fn combined_text(&self) -> String {
+        format!("{}\n{}", self.stdout, self.stderr)
+    }
+
+    fn is_access_denied(&self) -> bool {
+        let text = self.combined_text().to_ascii_lowercase();
+        text.contains("access is denied")
+            || text.contains("access denied")
+            || self.combined_text().contains("拒绝访问")
+    }
+
+    fn has_successful_termination(&self) -> bool {
+        let text = self.combined_text().to_ascii_lowercase();
+        text.contains("success")
+            || self.combined_text().contains("成功")
+            || self.combined_text().contains("已成功")
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn text_has_access_denied(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("access is denied")
+        || lower.contains("access denied")
+        || text.contains("拒绝访问")
+}
+
+#[cfg(target_os = "windows")]
+fn decode_windows_output(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    match String::from_utf8(bytes.to_vec()) {
+        Ok(value) => value.trim().to_string(),
+        Err(_) => {
+            let (decoded, _, _) = GBK.decode(bytes);
+            decoded.trim().to_string()
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn ps_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(target_os = "windows")]
+fn first_non_empty_lines(text: &str, max_lines: usize) -> String {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(max_lines)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        String::new()
+    } else {
+        lines.join(" / ")
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn command_status_detail(program: &str, args: &[&str]) -> Result<(), WindowsCommandError> {
     let output = Command::new(program)
         .args(args)
         .output()
-        .map_err(|err| format!("执行 {program} 失败：{err}"))?;
+        .map_err(|err| WindowsCommandError {
+            program: program.to_string(),
+            status: "未启动".to_string(),
+            stdout: String::new(),
+            stderr: format!("执行 {program} 失败：{err}"),
+        })?;
     if output.status.success() {
         return Ok(());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let mut details = Vec::new();
-    if !stdout.is_empty() {
-        details.push(format!("stdout: {stdout}"));
-    }
-    if !stderr.is_empty() {
-        details.push(format!("stderr: {stderr}"));
-    }
-
-    if details.is_empty() {
-        Err(format!("{program} 退出码异常：{}", output.status))
-    } else {
-        Err(format!(
-            "{program} 退出码异常：{}；{}",
-            output.status,
-            details.join("；")
-        ))
-    }
+    Err(WindowsCommandError {
+        program: program.to_string(),
+        status: output.status.to_string(),
+        stdout: decode_windows_output(&output.stdout),
+        stderr: decode_windows_output(&output.stderr),
+    })
 }
 
 fn write_to_command_stdin(program: &str, args: &[&str], text: &str) -> Result<(), String> {
@@ -799,10 +890,16 @@ fn windows_powershell_status(script: &str) -> Result<(), String> {
         "-Command",
         script,
     ];
-    command_status_detail("powershell.exe", &args).or_else(|powershell_err| {
-        command_status_detail("pwsh", &args)
-            .map_err(|pwsh_err| format!("powershell.exe: {powershell_err}；pwsh: {pwsh_err}"))
-    })
+    command_status_detail("powershell.exe", &args)
+        .map_err(|err| err.detail())
+        .or_else(|powershell_err| {
+            command_status_detail("pwsh", &args).map_err(|pwsh_err| {
+                format!(
+                    "powershell.exe: {powershell_err}；pwsh: {}",
+                    pwsh_err.detail()
+                )
+            })
+        })
 }
 
 #[cfg(target_os = "windows")]
@@ -861,6 +958,7 @@ fn quit_codex_process() -> Result<(), String> {
 fn quit_codex_process() -> Result<(), String> {
     let mut failures = Vec::new();
     let mut any_success = false;
+    let mut access_denied = false;
 
     match codex_windows_process_exists() {
         Ok(false) => return Ok(()),
@@ -868,9 +966,28 @@ fn quit_codex_process() -> Result<(), String> {
         Err(err) => failures.push(format!("检测 Codex.exe 进程失败：{err}")),
     }
 
+    let close_script = r#"
+$ErrorActionPreference = "SilentlyContinue"
+Get-Process -Name Codex | ForEach-Object { $_.CloseMainWindow() | Out-Null }
+Start-Sleep -Milliseconds 900
+"#;
+    if let Err(err) = windows_powershell_status(close_script) {
+        failures.push(format!("温和关闭失败：{err}"));
+    }
+
+    match codex_windows_process_exists() {
+        Ok(false) => return Ok(()),
+        Ok(true) => {}
+        Err(err) => failures.push(format!("温和关闭后检测进程失败：{err}")),
+    }
+
     match command_status_detail("taskkill", &["/F", "/T", "/IM", "Codex.exe"]) {
         Ok(()) => any_success = true,
-        Err(err) => failures.push(format!("taskkill 失败：{err}")),
+        Err(err) => {
+            any_success = any_success || err.has_successful_termination();
+            access_denied = access_denied || err.is_access_denied();
+            failures.push(format!("taskkill 失败：{}", err.detail()));
+        }
     }
     thread::sleep(Duration::from_millis(800));
 
@@ -886,14 +1003,25 @@ Get-Process -Name Codex -ErrorAction SilentlyContinue | Stop-Process -Force -Err
 "#;
     match windows_powershell_status(script) {
         Ok(()) => any_success = true,
-        Err(err) => failures.push(format!("PowerShell 失败：{err}")),
+        Err(err) => {
+            access_denied = access_denied || text_has_access_denied(&err);
+            failures.push(format!("PowerShell 失败：{err}"));
+        }
     }
     thread::sleep(Duration::from_millis(1200));
 
     match codex_windows_process_exists() {
         Ok(false) => Ok(()),
+        Ok(true) if access_denied => Err(format!(
+            "Codex app 仍在运行，Windows 拒绝当前切号器结束部分 Codex 进程。请点击“以管理员身份重启切号器”，或手动关闭 Codex app 后重试。{}",
+            if any_success {
+                "已成功关闭了一部分 Codex 子进程，但仍有进程需要更高权限。".to_string()
+            } else {
+                String::new()
+            }
+        )),
         Ok(true) => Err(format!(
-            "已尝试通过 taskkill 和 PowerShell 停止 Codex app，但 Codex.exe 仍在运行。请手动关闭 Codex app，或以管理员身份运行切号器后重试。{}",
+            "已尝试通过温和关闭、taskkill 和 PowerShell 停止 Codex app，但 Codex.exe 仍在运行。请手动关闭 Codex app 后重试。{}",
             if failures.is_empty() {
                 String::new()
             } else {
@@ -953,6 +1081,7 @@ $ErrorActionPreference = "Stop"
 Start-Process Codex
 "#;
     command_status_detail("cmd.exe", &["/C", "start", "", "Codex"])
+        .map_err(|err| err.detail())
         .or_else(|cmd_err| {
             windows_powershell_status(script)
                 .map_err(|ps_err| format!("cmd.exe: {cmd_err}；PowerShell: {ps_err}"))
@@ -985,6 +1114,27 @@ fn restart_codex_process() -> Result<(), String> {
     quit_codex_process()?;
     thread::sleep(Duration::from_millis(900));
     start_codex_process()
+}
+
+#[cfg(target_os = "windows")]
+fn restart_switcher_as_admin_process() -> Result<(), String> {
+    let current_exe = env::current_exe().map_err(|err| format!("读取当前程序路径失败：{err}"))?;
+    let exe = current_exe.to_string_lossy().to_string();
+    let script = format!(
+        r#"
+$ErrorActionPreference = "Stop"
+Start-Process -FilePath {} -Verb RunAs
+"#,
+        ps_single_quote(&exe)
+    );
+    windows_powershell_status(&script)
+        .map_err(|err| format!("无法以管理员身份重启切号器：{err}"))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn restart_switcher_as_admin_process() -> Result<(), String> {
+    Err("当前系统不需要 Windows 管理员重启流程".to_string())
 }
 
 fn read_file_tail(path: &Path, max_bytes: u64) -> Option<String> {
@@ -2189,6 +2339,13 @@ fn quit_codex_app() -> Result<String, String> {
     Ok("已尝试关闭 Codex app".to_string())
 }
 
+#[tauri::command]
+fn restart_switcher_as_admin(app: tauri::AppHandle) -> Result<String, String> {
+    restart_switcher_as_admin_process()?;
+    app.exit(0);
+    Ok("已请求以管理员身份重启切号器".to_string())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
@@ -2210,7 +2367,8 @@ pub fn run() {
             detect_system_network,
             copy_text_to_clipboard,
             quit_codex_app,
-            restart_codex_app
+            restart_codex_app,
+            restart_switcher_as_admin
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

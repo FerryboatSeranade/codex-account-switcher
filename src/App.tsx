@@ -177,7 +177,7 @@ const probeStatusLabel: Record<SystemProbeStatus, string> = {
   error: "失败"
 };
 
-const appBuildLabel = "v0.1.4-notepad-open";
+const appBuildLabel = "v0.1.5-windows-hardening";
 
 function needsAdminRestart(detail: string) {
   return (

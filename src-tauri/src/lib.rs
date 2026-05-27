@@ -727,14 +727,24 @@ fn command_stdout(program: &str, args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|err| format!("执行 {program} 失败：{err}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr = command_output_text(&output.stderr);
         return Err(if stderr.is_empty() {
             format!("{program} 退出码异常")
         } else {
             stderr
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(command_output_text(&output.stdout))
+}
+
+#[cfg(target_os = "windows")]
+fn command_output_text(bytes: &[u8]) -> String {
+    decode_windows_output(bytes)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn command_output_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).trim().to_string()
 }
 
 #[cfg(target_os = "windows")]
@@ -903,13 +913,28 @@ fn windows_powershell_status(script: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_powershell_stdout(script: &str) -> Result<String, String> {
+    let args = [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ];
+    command_stdout("powershell.exe", &args).or_else(|powershell_err| {
+        command_stdout("pwsh", &args)
+            .map_err(|pwsh_err| format!("powershell.exe: {powershell_err}；pwsh: {pwsh_err}"))
+    })
+}
+
+#[cfg(target_os = "windows")]
 fn windows_process_exists(image_name: &str) -> Result<bool, String> {
     let output = Command::new("tasklist")
         .args(["/FI", &format!("IMAGENAME eq {image_name}"), "/NH"])
         .output()
         .map_err(|err| format!("执行 tasklist 失败：{err}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr = decode_windows_output(&output.stderr);
         return Err(if stderr.is_empty() {
             format!("tasklist 退出码异常：{}", output.status)
         } else {
@@ -918,7 +943,7 @@ fn windows_process_exists(image_name: &str) -> Result<bool, String> {
     }
 
     let needle = image_name.to_ascii_lowercase();
-    let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+    let stdout = decode_windows_output(&output.stdout).to_ascii_lowercase();
     Ok(stdout.lines().any(|line| line.contains(&needle)))
 }
 
@@ -1750,12 +1775,7 @@ fn delete_profile(id: String) -> Result<AppState, String> {
 
 fn open_path_with_system(path: &Path, label: &str) -> Result<(), String> {
     if !path.exists() {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| format!("创建 {} 失败：{}", parent.to_string_lossy(), err))?;
-        }
-        fs::write(path, "")
-            .map_err(|err| format!("创建 {} 失败：{}", path.to_string_lossy(), err))?;
+        return Err(format!("{} 不存在：{}", label, path.to_string_lossy()));
     }
 
     #[cfg(target_os = "macos")]
@@ -1858,16 +1878,7 @@ fn detect_system_proxy() -> SystemProbeCheck {
 $proxy = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
 if ($proxy.ProxyEnable -eq 1) { "enabled $($proxy.ProxyServer)" } else { "disabled" }
 "#;
-    match command_stdout(
-        "powershell",
-        &[
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ],
-    ) {
+    match windows_powershell_stdout(script) {
         Ok(output) if output.starts_with("enabled") => system_probe_check(
             SystemProbeStatus::Ok,
             "系统代理",
@@ -2009,16 +2020,7 @@ Get-NetAdapter | Where-Object {
   $_.Status -eq 'Up' -and ($_.InterfaceDescription -match 'TAP|TUN|WireGuard|Wintun|VPN|Clash|Tailscale|ZeroTier')
 } | Select-Object -ExpandProperty Name
 "#;
-    match command_stdout(
-        "powershell",
-        &[
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ],
-    ) {
+    match windows_powershell_stdout(script) {
         Ok(output) if !output.trim().is_empty() => system_probe_check(
             SystemProbeStatus::Ok,
             "虚拟网卡",
@@ -2187,7 +2189,7 @@ fn detect_google_connectivity() -> SystemProbeCheck {
 
     match output {
         Ok(result) if result.status.success() => {
-            let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
+            let stdout = command_output_text(&result.stdout);
             let mut parts = stdout.split_whitespace();
             let code = parts.next().unwrap_or("未知");
             let seconds = parts.next().unwrap_or("未知");
@@ -2200,7 +2202,7 @@ fn detect_google_connectivity() -> SystemProbeCheck {
             )
         }
         Ok(result) => {
-            let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
+            let stderr = command_output_text(&result.stderr);
             system_probe_check(
                 SystemProbeStatus::Error,
                 "Google 连接",
@@ -2304,16 +2306,29 @@ fn copy_text_to_clipboard(text: String) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
         write_to_command_stdin(
-            "powershell",
+            "powershell.exe",
             &[
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
-                "Set-Clipboard -Value ([Console]::In.ReadToEnd())",
+                "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())",
             ],
             &text,
-        )?;
+        )
+        .or_else(|_| {
+            write_to_command_stdin(
+                "pwsh",
+                &[
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())",
+                ],
+                &text,
+            )
+        })?;
         return Ok("检测结果已复制到剪贴板".to_string());
     }
 

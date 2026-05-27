@@ -240,6 +240,56 @@ Rules:
 - put the key password in GitHub Secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`;
 - do not commit `updater.key` or `updater.key.pub`.
 
+### macOS Signing And Notarization
+
+macOS may show `"Codex Account Switcher.app" is damaged and can't be opened` when the app is not signed with an Apple Developer ID certificate and notarized by Apple. This is Gatekeeper blocking the app, not necessarily a corrupt DMG.
+
+Current release builds always use Tauri updater signatures. For normal macOS distribution, also configure Apple signing/notarization.
+
+Requirements:
+
+- Apple Developer Program membership, normally 99 USD/year.
+- A `Developer ID Application` certificate.
+- An Apple ID app-specific password for notarization, or equivalent App Store Connect credentials.
+- GitHub Secrets configured for the release workflow.
+
+GitHub Secrets used by `.github/workflows/release.yml`:
+
+- `APPLE_CERTIFICATE`: base64-encoded `.p12` Developer ID Application certificate.
+- `APPLE_CERTIFICATE_PASSWORD`: password for the `.p12` certificate.
+- `APPLE_SIGNING_IDENTITY`: signing identity name, for example `Developer ID Application: Your Name (TEAMID)`.
+- `APPLE_ID`: Apple ID email used for notarization.
+- `APPLE_PASSWORD`: app-specific password for that Apple ID.
+- `APPLE_TEAM_ID`: Apple Developer Team ID.
+
+Example certificate export:
+
+```sh
+security find-identity -v -p codesigning
+security export -t identities -f pkcs12 \
+  -o developer-id-application.p12 \
+  -k ~/Library/Keychains/login.keychain-db
+base64 -i developer-id-application.p12 | pbcopy
+```
+
+Paste the base64 output into the `APPLE_CERTIFICATE` GitHub Secret. Store the `.p12` export password in `APPLE_CERTIFICATE_PASSWORD`.
+
+Local verification after a signed release:
+
+```sh
+spctl --assess --verbose=4 --type execute "/Applications/Codex Account Switcher.app"
+codesign -dv --verbose=4 "/Applications/Codex Account Switcher.app"
+```
+
+An unsigned local workaround for trusted self-use is:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Codex Account Switcher.app"
+open "/Applications/Codex Account Switcher.app"
+```
+
+Do not present the workaround as the normal install path for public users; public macOS releases should be signed and notarized.
+
 ### Configure GitHub Releases
 
 The app is configured to read release metadata from:

@@ -735,6 +735,37 @@ fn command_stdout(program: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[cfg(target_os = "windows")]
+fn command_status_detail(program: &str, args: &[&str]) -> Result<(), String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|err| format!("执行 {program} 失败：{err}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut details = Vec::new();
+    if !stdout.is_empty() {
+        details.push(format!("stdout: {stdout}"));
+    }
+    if !stderr.is_empty() {
+        details.push(format!("stderr: {stderr}"));
+    }
+
+    if details.is_empty() {
+        Err(format!("{program} 退出码异常：{}", output.status))
+    } else {
+        Err(format!(
+            "{program} 退出码异常：{}；{}",
+            output.status,
+            details.join("；")
+        ))
+    }
+}
+
 fn write_to_command_stdin(program: &str, args: &[&str], text: &str) -> Result<(), String> {
     let mut child = Command::new(program)
         .args(args)
@@ -757,6 +788,46 @@ fn write_to_command_stdin(program: &str, args: &[&str], text: &str) -> Result<()
     } else {
         Err(format!("{program} 退出码异常"))
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_powershell_status(script: &str) -> Result<(), String> {
+    let args = [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ];
+    command_status_detail("powershell.exe", &args).or_else(|powershell_err| {
+        command_status_detail("pwsh", &args)
+            .map_err(|pwsh_err| format!("powershell.exe: {powershell_err}；pwsh: {pwsh_err}"))
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_process_exists(image_name: &str) -> Result<bool, String> {
+    let output = Command::new("tasklist")
+        .args(["/FI", &format!("IMAGENAME eq {image_name}"), "/NH"])
+        .output()
+        .map_err(|err| format!("执行 tasklist 失败：{err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("tasklist 退出码异常：{}", output.status)
+        } else {
+            stderr
+        });
+    }
+
+    let needle = image_name.to_ascii_lowercase();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+    Ok(stdout.lines().any(|line| line.contains(&needle)))
+}
+
+#[cfg(target_os = "windows")]
+fn codex_windows_process_exists() -> Result<bool, String> {
+    windows_process_exists("Codex.exe")
 }
 
 fn system_probe_check(
@@ -788,25 +859,57 @@ fn quit_codex_process() -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn quit_codex_process() -> Result<(), String> {
+    let mut failures = Vec::new();
+    let mut any_success = false;
+
+    match codex_windows_process_exists() {
+        Ok(false) => return Ok(()),
+        Ok(true) => {}
+        Err(err) => failures.push(format!("检测 Codex.exe 进程失败：{err}")),
+    }
+
+    match command_status_detail("taskkill", &["/F", "/T", "/IM", "Codex.exe"]) {
+        Ok(()) => any_success = true,
+        Err(err) => failures.push(format!("taskkill 失败：{err}")),
+    }
+    thread::sleep(Duration::from_millis(800));
+
+    match codex_windows_process_exists() {
+        Ok(false) => return Ok(()),
+        Ok(true) => {}
+        Err(err) => failures.push(format!("taskkill 后检测进程失败：{err}")),
+    }
+
     let script = r#"
-$ErrorActionPreference = "SilentlyContinue"
-Get-Process -Name Codex | Stop-Process -Force
+$ErrorActionPreference = "Continue"
+Get-Process -Name Codex -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction Continue
 "#;
-    let status = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ])
-        .status()
-        .map_err(|err| format!("停止 Codex 失败：{}", err))?;
-    if !status.success() {
-        return Err("未能通过 PowerShell 停止 Codex app".to_string());
+    match windows_powershell_status(script) {
+        Ok(()) => any_success = true,
+        Err(err) => failures.push(format!("PowerShell 失败：{err}")),
     }
     thread::sleep(Duration::from_millis(1200));
-    Ok(())
+
+    match codex_windows_process_exists() {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(format!(
+            "已尝试通过 taskkill 和 PowerShell 停止 Codex app，但 Codex.exe 仍在运行。请手动关闭 Codex app，或以管理员身份运行切号器后重试。{}",
+            if failures.is_empty() {
+                String::new()
+            } else {
+                format!(" 详细：{}", failures.join("；"))
+            }
+        )),
+        Err(err) if any_success => Ok(()),
+        Err(err) => Err(format!(
+            "无法确认 Codex app 是否已关闭：{err}。{}",
+            if failures.is_empty() {
+                "请手动关闭 Codex app 后重试。".to_string()
+            } else {
+                format!("详细：{}", failures.join("；"))
+            }
+        )),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -846,24 +949,15 @@ fn start_codex_process() -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn start_codex_process() -> Result<(), String> {
     let script = r#"
-$ErrorActionPreference = "SilentlyContinue"
+$ErrorActionPreference = "Stop"
 Start-Process Codex
 "#;
-    let status = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ])
-        .status()
-        .map_err(|err| format!("启动 Codex 失败：{}", err))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("未能通过 PowerShell 启动 Codex app".to_string())
-    }
+    command_status_detail("cmd.exe", &["/C", "start", "", "Codex"])
+        .or_else(|cmd_err| {
+            windows_powershell_status(script)
+                .map_err(|ps_err| format!("cmd.exe: {cmd_err}；PowerShell: {ps_err}"))
+        })
+        .map_err(|err| format!("未能通过 Windows shell 启动 Codex app。详细：{err}"))
 }
 
 #[cfg(target_os = "linux")]

@@ -176,7 +176,7 @@ const probeStatusLabel: Record<SystemProbeStatus, string> = {
   error: "失败"
 };
 
-const appBuildLabel = "v0.1.10-updater-gogoais";
+const appBuildLabel = "v0.1.2-windows-process";
 
 function formatSystemProbeReport(report: SystemProbeReport) {
   const lines = [
@@ -1188,7 +1188,7 @@ function App() {
             />
             <span>
               <strong>切换后重启 Codex app</strong>
-              <small>macOS 使用 open -a Codex，Windows 使用 PowerShell，Linux 尝试桌面入口或 codex 命令。</small>
+              <small>macOS 使用 open -a Codex，Windows 使用 taskkill/PowerShell，Linux 尝试桌面入口或 codex 命令。</small>
             </span>
           </label>
           <div className="modal-actions">

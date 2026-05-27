@@ -23,6 +23,26 @@ Important cases:
 
 If `model_provider = "OpenAI"` and `[model_providers.OpenAI].base_url = "https://code.gogoais.com"`, Codex will send requests to that proxy even if the lower-left account menu shows a ChatGPT account. A 401 like `INVALID_API_KEY` usually means the API key used for that proxy is invalid or mismatched.
 
+For API-key proxy profiles, the switcher writes both files together:
+
+```toml
+model_provider = "OpenAI"
+
+[model_providers.OpenAI]
+name = "OpenAI"
+base_url = "https://code.gogoais.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+```
+
+```json
+{
+  "OPENAI_API_KEY": "sk-..."
+}
+```
+
+The UI accepts a root Base URL such as `https://code.gogoais.com`; the saved provider URL is normalized to `/v1`.
+
 ## Key Files
 
 - `~/.codex/config.toml`: provider, model, base URL, plugins, MCP servers, and other Codex config.
@@ -171,6 +191,8 @@ Expected response fields:
 
 The switcher does not store the gogoais username/password in profiles. The password is cleared from the UI after a successful fetch. Saved proxy profiles still contain only the resulting `auth.json`/`config.toml` snapshot.
 
+After a successful gogoais fetch, the form automatically switches to `只用 API Key` so saving the proxy profile writes the custom provider block and `OPENAI_API_KEY` instead of account-mode `openai_base_url`.
+
 ## Online Updates
 
 The switcher uses the official Tauri v2 updater path:
@@ -234,7 +256,7 @@ If the GitHub repository name changes, update both files and the release workflo
 
 1. Bump versions in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
 2. Commit the changes.
-3. Create and push a tag, for example `v0.1.9`.
+3. Create and push a tag, for example `v0.1.10`.
 4. GitHub Actions builds installers, updater archives, signatures, and release metadata.
 5. Review the draft release, then publish it.
 

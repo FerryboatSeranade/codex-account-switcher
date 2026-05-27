@@ -199,7 +199,7 @@ const defaultProxyForm: ProxyForm = {
   review_model: "gpt-5.5",
   reasoning_effort: "xhigh",
   notes: "",
-  codex_system: "account"
+  codex_system: "api"
 };
 
 const defaultHostsForm: HostsForm = {
@@ -261,7 +261,7 @@ const probeStatusLabel: Record<SystemProbeStatus, string> = {
   error: "失败"
 };
 
-const appBuildLabel = "v0.1.9-client-preference";
+const appBuildLabel = "v0.1.10-api-profile-fix";
 const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const AUTO_UPDATE_LAST_CHECK_KEY = "codex-account-switcher:last-auto-update-check";
 
@@ -1097,12 +1097,12 @@ function App() {
         ...current,
         api_key: result.api_key,
         base_url: nextBaseUrl,
-        codex_system: current.codex_system
+        codex_system: "api"
       }));
       const expiresAt = formatBeijingDateTime(result.expires_at);
       const serviceStatus = serviceStatusLabel(result.service_status);
       const detail = [
-        "已获取并填入 API Key。",
+        "已获取并填入 API Key，认证方式已切到只用 API Key。",
         result.api_key_name ? `Key：${result.api_key_name}` : "",
         serviceStatus ? `服务状态：${serviceStatus}` : "",
         expiresAt ? `到期：${expiresAt}` : "",
@@ -1637,7 +1637,7 @@ function App() {
                     </select>
                   </label>
                   <p className="field-hint">
-                    沿用登录态会保留当前 ChatGPT token，并把中转 Base URL 写进 config；只用 API Key 会写入 OPENAI_API_KEY。
+                    只用 API Key 会写入 OPENAI_API_KEY 和完整 provider 配置；沿用登录态只适合已有 ChatGPT tokens 的账号体系。
                   </p>
                   <label>
                     API Key{proxyForm.codex_system === "account" ? "（无登录态时兜底）" : ""}

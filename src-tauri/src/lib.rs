@@ -15,7 +15,7 @@ use std::{
     thread,
     time::Duration,
 };
-use toml_edit::{value, DocumentMut, Item};
+use toml_edit::{value, DocumentMut, Item, Table};
 use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -420,6 +420,21 @@ fn load_store() -> Result<Store, String> {
             profile.isolate_sessions = false;
             changed = true;
         }
+        if profile.kind == ProfileKind::ProxyApiKey
+            && profile.codex_system == CodexSystem::Account
+            && auth_has_api_key(&profile.auth_json)
+            && !auth_has_login_tokens(&profile.auth_json)
+        {
+            profile.codex_system = CodexSystem::Api;
+            changed = true;
+        }
+        if profile.codex_system == CodexSystem::Api {
+            let before = profile.config_toml.clone();
+            ensure_api_profile_files(profile)?;
+            if profile.config_toml != before {
+                changed = true;
+            }
+        }
     }
     if changed {
         save_store(&store)?;
@@ -451,7 +466,28 @@ fn extract_toml_value(raw: &Option<String>, key: &str) -> Option<String> {
 }
 
 fn extract_base_url(raw: &Option<String>) -> Option<String> {
-    extract_toml_value(raw, "openai_base_url").or_else(|| extract_toml_value(raw, "base_url"))
+    let raw_config = raw.as_ref()?;
+    let Ok(doc) = raw_config.parse::<DocumentMut>() else {
+        return extract_toml_value(raw, "openai_base_url")
+            .or_else(|| extract_toml_value(raw, "base_url"));
+    };
+    doc.get("openai_base_url")
+        .and_then(Item::as_str)
+        .map(ToString::to_string)
+        .or_else(|| {
+            doc.get("model_provider")
+                .and_then(Item::as_str)
+                .and_then(|provider| {
+                    doc.get("model_providers")
+                        .and_then(Item::as_table_like)
+                        .and_then(|providers| providers.get(provider))
+                        .and_then(Item::as_table_like)
+                        .and_then(|provider_table| provider_table.get("base_url"))
+                        .and_then(Item::as_str)
+                        .map(ToString::to_string)
+                })
+        })
+        .or_else(|| extract_toml_value(raw, "base_url"))
 }
 
 fn auth_mode(auth: &Option<String>) -> String {
@@ -767,6 +803,101 @@ fn account_mode_config(raw: Option<&str>) -> String {
         }
     }
     format!("{}\n", doc.to_string().trim_end())
+}
+
+fn proxy_base_config_document(model: &str, review_model: &str, effort: &str, provider: &str) -> DocumentMut {
+    let mut doc = DocumentMut::new();
+    doc["model_provider"] = value(provider);
+    doc["model"] = value(model);
+    doc["review_model"] = value(review_model);
+    doc["model_reasoning_effort"] = value(effort);
+    doc["disable_response_storage"] = value(true);
+    doc["network_access"] = value("enabled");
+    doc["windows_wsl_setup_acknowledged"] = value(true);
+    doc["model_context_window"] = value(1_000_000);
+    doc["model_auto_compact_token_limit"] = value(900_000);
+    doc
+}
+
+fn trim_api_version_suffix(raw: &str) -> String {
+    let value = raw.trim().trim_end_matches('/');
+    value
+        .strip_suffix("/v1")
+        .unwrap_or(value)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn normalize_proxy_base_url(raw: &str) -> String {
+    trim_api_version_suffix(raw)
+}
+
+fn api_provider_base_url(raw: &str) -> String {
+    let base_url = normalize_proxy_base_url(raw);
+    if base_url.ends_with("/v1") {
+        base_url
+    } else {
+        format!("{base_url}/v1")
+    }
+}
+
+fn proxy_account_config(model: &str, review_model: &str, effort: &str, base_url: &str) -> String {
+    let mut doc = proxy_base_config_document(model, review_model, effort, "openai");
+    doc["openai_base_url"] = value(normalize_proxy_base_url(base_url));
+    format!("{}\n", doc.to_string().trim_end())
+}
+
+fn proxy_api_config(model: &str, review_model: &str, effort: &str, base_url: &str) -> String {
+    let mut doc = proxy_base_config_document(model, review_model, effort, "OpenAI");
+    let mut providers = Table::new();
+    providers.set_implicit(true);
+    let mut openai = Table::new();
+    openai["name"] = value("OpenAI");
+    openai["base_url"] = value(api_provider_base_url(base_url));
+    openai["wire_api"] = value("responses");
+    openai["requires_openai_auth"] = value(true);
+    providers["OpenAI"] = Item::Table(openai);
+    doc["model_providers"] = Item::Table(providers);
+    format!("{}\n", doc.to_string().trim_end())
+}
+
+fn api_auth_json(api_key: &str) -> String {
+    serde_json::json!({ "OPENAI_API_KEY": api_key.trim() }).to_string()
+}
+
+fn ensure_api_profile_files(profile: &mut Profile) -> Result<(), String> {
+    if profile.codex_system != CodexSystem::Api {
+        return Ok(());
+    }
+
+    if !auth_has_api_key(&profile.auth_json) {
+        return Err(format!(
+            "API Key 档案「{}」没有写入 OPENAI_API_KEY，请重新获取/填写 Key 后创建档案。",
+            profile.name
+        ));
+    }
+
+    let config = profile.config_toml.clone().ok_or_else(|| {
+        format!(
+            "API Key 档案「{}」缺少 config.toml，请重新创建这个档案。",
+            profile.name
+        )
+    })?;
+    let model = extract_toml_value(&Some(config.clone()), "model").unwrap_or_else(|| "gpt-5.5".to_string());
+    let review_model =
+        extract_toml_value(&Some(config.clone()), "review_model").unwrap_or_else(|| model.clone());
+    let effort = extract_toml_value(&Some(config.clone()), "model_reasoning_effort")
+        .unwrap_or_else(|| "xhigh".to_string());
+    let base_url = extract_base_url(&Some(config)).ok_or_else(|| {
+        format!(
+            "API Key 档案「{}」缺少 Base URL，请重新创建这个档案。",
+            profile.name
+        )
+    })?;
+    let base_url = trim_api_version_suffix(&base_url);
+
+    profile.config_toml = Some(proxy_api_config(&model, &review_model, &effort, &base_url));
+    Ok(())
 }
 
 fn update_recent_thread_providers() {
@@ -1675,7 +1806,7 @@ fn import_current_profile(input: ImportInput) -> Result<AppState, String> {
 #[tauri::command]
 fn create_proxy_profile(input: ProxyProfileInput) -> Result<AppState, String> {
     let name = input.name.trim();
-    let base_url = input.base_url.trim().trim_end_matches('/');
+    let base_url = normalize_proxy_base_url(&input.base_url);
     let api_key = input.api_key.trim();
     let codex_system = input.codex_system.unwrap_or_default();
     if name.is_empty() || base_url.is_empty() {
@@ -1702,37 +1833,8 @@ fn create_proxy_profile(input: ProxyProfileInput) -> Result<AppState, String> {
     };
 
     let config_toml = match codex_system {
-        CodexSystem::Account => format!(
-            r#"model_provider = "openai"
-model = "{model}"
-review_model = "{review_model}"
-model_reasoning_effort = "{effort}"
-disable_response_storage = true
-network_access = "enabled"
-windows_wsl_setup_acknowledged = true
-model_context_window = 1000000
-model_auto_compact_token_limit = 900000
-openai_base_url = "{base_url}"
-"#
-        ),
-        CodexSystem::Api => format!(
-            r#"model_provider = "OpenAI"
-model = "{model}"
-review_model = "{review_model}"
-model_reasoning_effort = "{effort}"
-disable_response_storage = true
-network_access = "enabled"
-windows_wsl_setup_acknowledged = true
-model_context_window = 1000000
-model_auto_compact_token_limit = 900000
-
-[model_providers.OpenAI]
-name = "OpenAI"
-base_url = "{base_url}"
-wire_api = "responses"
-requires_openai_auth = true
-"#
-        ),
+        CodexSystem::Account => proxy_account_config(model, review_model, effort, &base_url),
+        CodexSystem::Api => proxy_api_config(model, review_model, effort, &base_url),
     };
     let auth_json = match codex_system {
         CodexSystem::Account => {
@@ -1740,17 +1842,17 @@ requires_openai_auth = true
             let current_mode = auth_mode(&current_auth);
             if current_mode == "ChatGPT 登录授权" {
                 current_auth
-                    .unwrap_or_else(|| serde_json::json!({ "OPENAI_API_KEY": api_key }).to_string())
+                    .unwrap_or_else(|| api_auth_json(api_key))
             } else if api_key.is_empty() {
                 return Err(
                     "当前没有 ChatGPT 登录授权；请先导入/登录账号，或填写 API Key 作为兜底"
                         .to_string(),
                 );
             } else {
-                serde_json::json!({ "OPENAI_API_KEY": api_key }).to_string()
+                api_auth_json(api_key)
             }
         }
-        CodexSystem::Api => serde_json::json!({ "OPENAI_API_KEY": api_key }).to_string(),
+        CodexSystem::Api => api_auth_json(api_key),
     };
     let now = Utc::now();
     let mut store = load_store()?;
@@ -3070,5 +3172,23 @@ mod tests {
         let (lines, removed) = rewrite_hosts_for_delete(raw, "api.local");
         assert_eq!(removed, 1);
         assert_eq!(lines, vec!["10.0.0.1 api.local"]);
+    }
+
+    #[test]
+    fn api_proxy_config_writes_provider_block_and_v1_url() {
+        let config = proxy_api_config("gpt-5.5", "gpt-5.5", "xhigh", "https://code.gogoais.com");
+        assert!(config.contains("model_provider = \"OpenAI\""), "{config}");
+        assert!(config.contains("[model_providers.OpenAI]"), "{config}");
+        assert!(config.contains("base_url = \"https://code.gogoais.com/v1\""), "{config}");
+        assert!(config.contains("wire_api = \"responses\""), "{config}");
+        assert!(config.contains("requires_openai_auth = true"), "{config}");
+        assert!(!config.contains("openai_base_url"), "{config}");
+    }
+
+    #[test]
+    fn api_auth_json_writes_openai_api_key() {
+        let raw = api_auth_json(" sk-test ");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["OPENAI_API_KEY"], "sk-test");
     }
 }

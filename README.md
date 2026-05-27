@@ -233,8 +233,10 @@ If the GitHub repository name changes, update both files and the release workflo
 
 1. Bump versions in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
 2. Commit the changes.
-3. Create and push a tag, for example `v0.1.7`.
+3. Create and push a tag, for example `v0.1.8`.
 4. GitHub Actions builds installers, updater archives, signatures, and release metadata.
 5. Review the draft release, then publish it.
 
-The app's `检查更新` button checks the configured `latest.json`. If a newer version is found, it shows release notes, downloads the signed updater package, installs it, and relaunches the switcher.
+The app checks for updates automatically every 24 hours after startup. It stores the last automatic check timestamp in browser `localStorage` under `codex-account-switcher:last-auto-update-check`. If no update is available, the automatic check stays quiet; if a newer version is found, it shows the update panel so the user can install it.
+
+The app's `检查更新` button still checks the configured `latest.json` immediately. If a newer version is found, it shows release notes, downloads the signed updater package, installs it, and relaunches the switcher.

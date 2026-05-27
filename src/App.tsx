@@ -23,7 +23,7 @@ import {
   UserRoundPlus,
   Zap
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type ProfileKind = "chat_gpt_login" | "proxy_api_key" | "custom";
 type CodexSystem = "account" | "api";
@@ -217,7 +217,48 @@ const probeStatusLabel: Record<SystemProbeStatus, string> = {
   error: "失败"
 };
 
-const appBuildLabel = "v0.1.7-proxy-tabs";
+const appBuildLabel = "v0.1.8-auto-update";
+const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const AUTO_UPDATE_LAST_CHECK_KEY = "codex-account-switcher:last-auto-update-check";
+
+function readLastAutoUpdateCheck() {
+  try {
+    const raw = window.localStorage.getItem(AUTO_UPDATE_LAST_CHECK_KEY);
+    const timestamp = raw ? Number(raw) : 0;
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function rememberAutoUpdateCheck() {
+  try {
+    window.localStorage.setItem(AUTO_UPDATE_LAST_CHECK_KEY, String(Date.now()));
+  } catch {
+    // Losing this timestamp only means the next launch may check again.
+  }
+}
+
+function shouldRunAutoUpdateCheck() {
+  const lastCheck = readLastAutoUpdateCheck();
+  if (!lastCheck) {
+    return true;
+  }
+  const elapsed = Date.now() - lastCheck;
+  return elapsed < 0 || elapsed >= AUTO_UPDATE_INTERVAL_MS;
+}
+
+function autoUpdateCheckDelay() {
+  const lastCheck = readLastAutoUpdateCheck();
+  if (!lastCheck) {
+    return 3000;
+  }
+  const elapsed = Date.now() - lastCheck;
+  if (elapsed < 0 || elapsed >= AUTO_UPDATE_INTERVAL_MS) {
+    return 3000;
+  }
+  return AUTO_UPDATE_INTERVAL_MS - elapsed;
+}
 
 function needsAdminRestart(detail: string) {
   return (
@@ -378,6 +419,7 @@ function App() {
   const [downloadTotal, setDownloadTotal] = useState<number | null>(null);
   const [hostsState, setHostsState] = useState<HostsState | null>(null);
   const [hostsExpanded, setHostsExpanded] = useState(false);
+  const autoUpdateCheckInFlight = useRef(false);
   const [importForm, setImportForm] = useState<ImportForm>({
     name: "我的 Plus/Pro 账号",
     kind: "chat_gpt_login",
@@ -431,6 +473,38 @@ function App() {
 
   useEffect(() => {
     load();
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+
+    let disposed = false;
+    let timer: number | undefined;
+
+    const scheduleNextCheck = (delay: number) => {
+      timer = window.setTimeout(async () => {
+        if (disposed) {
+          return;
+        }
+        if (shouldRunAutoUpdateCheck()) {
+          await runUpdateCheck({ automatic: true });
+        }
+        if (!disposed) {
+          scheduleNextCheck(autoUpdateCheckDelay());
+        }
+      }, delay);
+    };
+
+    scheduleNextCheck(autoUpdateCheckDelay());
+
+    return () => {
+      disposed = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -787,27 +861,42 @@ function App() {
     }
   }
 
-  async function checkForUpdates() {
-    setError("");
-    setNotice("");
-    setLastAction(null);
-    clearProbeReport();
-    setAvailableUpdate(null);
-    setUpdateState(null);
-    setDownloadedBytes(0);
-    setDownloadTotal(null);
-    setBusy("check-update");
+  async function runUpdateCheck({ automatic = false } = {}) {
+    if (automatic && autoUpdateCheckInFlight.current) {
+      return;
+    }
+    if (automatic) {
+      autoUpdateCheckInFlight.current = true;
+    } else {
+      setError("");
+      setNotice("");
+      setLastAction(null);
+      clearProbeReport();
+      setAvailableUpdate(null);
+      setUpdateState(null);
+      setDownloadedBytes(0);
+      setDownloadTotal(null);
+      setBusy("check-update");
+    }
     try {
       if (!isTauriRuntime()) {
         throw new Error("请在 Tauri 桌面窗口中检查更新");
       }
       const update = await check();
+      if (automatic) {
+        rememberAutoUpdateCheck();
+      }
       if (!update) {
+        if (automatic) {
+          return;
+        }
         const detail = "当前已经是最新版本。";
         setNotice(detail);
         setLastAction({ kind: "info", title: "没有可用更新", detail });
         return;
       }
+      setDownloadedBytes(0);
+      setDownloadTotal(null);
       setAvailableUpdate(update);
       setUpdateState({
         available: true,
@@ -816,16 +905,33 @@ function App() {
         date: update.date,
         body: update.body
       });
-      const detail = `发现新版本 ${update.version}，当前版本 ${update.currentVersion}。`;
+      const detail = automatic
+        ? `自动检测发现新版本 ${update.version}，当前版本 ${update.currentVersion}。`
+        : `发现新版本 ${update.version}，当前版本 ${update.currentVersion}。`;
       setNotice(detail);
-      setLastAction({ kind: "success", title: "发现新版本", detail });
+      setLastAction({ kind: "success", title: automatic ? "自动发现新版本" : "发现新版本", detail });
     } catch (err) {
+      if (automatic) {
+        rememberAutoUpdateCheck();
+      }
       const detail = updateErrorMessage(err);
-      setError(detail);
-      setLastAction({ kind: "error", title: "检查更新失败", detail });
+      if (automatic) {
+        setLastAction({ kind: "error", title: "自动检查更新失败", detail });
+      } else {
+        setError(detail);
+        setLastAction({ kind: "error", title: "检查更新失败", detail });
+      }
     } finally {
-      setBusy("");
+      if (automatic) {
+        autoUpdateCheckInFlight.current = false;
+      } else {
+        setBusy("");
+      }
     }
+  }
+
+  async function checkForUpdates() {
+    await runUpdateCheck();
   }
 
   async function installAvailableUpdate() {

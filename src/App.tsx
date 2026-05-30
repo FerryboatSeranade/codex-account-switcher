@@ -262,7 +262,7 @@ const probeStatusLabel: Record<SystemProbeStatus, string> = {
   error: "失败"
 };
 
-const appBuildLabel = "v0.1.14-codex-app-detect";
+const appBuildLabel = "v0.1.15-system-rename";
 const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const AUTO_UPDATE_LAST_CHECK_KEY = "codex-account-switcher:last-auto-update-check";
 
@@ -1230,7 +1230,7 @@ function App() {
     <main className="app-shell">
       <section className="topbar">
         <div>
-          <p className="eyebrow">Codex Account Switcher</p>
+          <p className="eyebrow">Profile Switcher</p>
           <h1>Codex 切号器</h1>
           <p className="build-label">{appBuildLabel}</p>
         </div>

@@ -1,8 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Codex Account Switcher",
-  "version": "0.1.14",
-  "identifier": "com.local.codex-account-switcher",
+  "productName": "Profile Switcher",
+  "mainBinaryName": "profile-switcher",
+  "version": "0.1.15",
+  "identifier": "com.local.profile-switcher",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "Codex Account Switcher",
+        "title": "Profile Switcher",
         "width": 1120,
         "height": 760,
         "minWidth": 920,
@@ -26,6 +27,15 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Profile Switcher",
+    "windows": {
+      "wix": {
+        "upgradeCode": "a9d6b197-8e26-5ca5-91bf-8474150fa2b9"
+      },
+      "nsis": {
+        "installerHooks": "windows/nsis-cleanup.nsh"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

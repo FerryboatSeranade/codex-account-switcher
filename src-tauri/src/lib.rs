@@ -1635,8 +1635,8 @@ function Test-IsCodexSwitcher($entry) {
   $name = [string]$entry.Name
   $appId = [string]$entry.AppID
   return (
-    $name -match "(?i)Codex Account Switcher|Account Switcher|切号器" -or
-    $appId -match "(?i)codex-account-switcher|com\.local\.codex-account-switcher|account-switcher"
+    $name -match "(?i)Profile Switcher|Codex Account Switcher|Account Switcher|切号器" -or
+    $appId -match "(?i)profile-switcher|com\.local\.profile-switcher|codex-account-switcher|com\.local\.codex-account-switcher|account-switcher"
   )
 }
 

@@ -1,6 +1,10 @@
-# Codex Account Switcher Notes
+# Profile Switcher Notes
 
 This project manages local Codex Desktop/CLI state under `~/.codex`.
+
+Since v0.1.15 the installed app name is `Profile Switcher`, with bundle identifier `com.local.profile-switcher` and Windows executable name `profile-switcher.exe`. This avoids polluting Windows StartApps/launcher matching with another app named `Codex`. The tool still manages Codex state, and it intentionally keeps the existing local data folder named `codex-account-switcher` so old profiles/backups survive upgrades.
+
+Windows packaging keeps the previous MSI upgrade code so upgrades replace the old install instead of creating a duplicate app. The NSIS installer also removes legacy Start menu shortcuts named `Codex Account Switcher` during install/uninstall.
 
 ## Auth Modes
 
@@ -134,7 +138,7 @@ This keeps ChatGPT account profiles and API/proxy profiles looking at the same t
 - Switching mode does not hide, archive, copy, or restore threads.
 - Saved switcher profiles contain only `auth.json`/`config.toml` snapshots plus labels/notes.
 - The target client preference is stored in the switcher's `profiles.json` as `client_preference`. `codex_app` can close/reopen Codex App after writes. `vscode_extension` and `cli_other` only write `~/.codex` and then tell the user to reload VS Code or restart the CLI process.
-- On Windows, `codex_app` detects and starts the desktop app through the Start menu AppID (`shell:AppsFolder\...`) instead of `start Codex`, because the plain command name can resolve to Codex CLI (`codex.cmd`/`codex.exe`) when CLI is on PATH. The detector excludes this switcher app (`Codex Account Switcher` / `codex-account-switcher`) so the switcher is not mistaken for the official Codex App.
+- On Windows, `codex_app` detects and starts the desktop app through the Start menu AppID (`shell:AppsFolder\...`) instead of `start Codex`, because the plain command name can resolve to Codex CLI (`codex.cmd`/`codex.exe`) when CLI is on PATH. The detector prefers the official `OpenAI.Codex` package and excludes this switcher app (`Profile Switcher`, legacy `Codex Account Switcher`, and their app ids) so the switcher is not mistaken for the official Codex App.
 
 ## Reset Account State
 
@@ -272,7 +276,7 @@ Rules:
 
 ### macOS Signing And Notarization
 
-macOS may show `"Codex Account Switcher.app" is damaged and can't be opened` when the app is not signed with an Apple Developer ID certificate and notarized by Apple. This is Gatekeeper blocking the app, not necessarily a corrupt DMG.
+macOS may show `"Profile Switcher.app" is damaged and can't be opened` when the app is not signed with an Apple Developer ID certificate and notarized by Apple. This is Gatekeeper blocking the app, not necessarily a corrupt DMG.
 
 Current release builds always use Tauri updater signatures. For normal macOS distribution, also configure Apple signing/notarization.
 
@@ -307,15 +311,15 @@ Paste the base64 output into the `APPLE_CERTIFICATE` GitHub Secret. Store the `.
 Local verification after a signed release:
 
 ```sh
-spctl --assess --verbose=4 --type execute "/Applications/Codex Account Switcher.app"
-codesign -dv --verbose=4 "/Applications/Codex Account Switcher.app"
+spctl --assess --verbose=4 --type execute "/Applications/Profile Switcher.app"
+codesign -dv --verbose=4 "/Applications/Profile Switcher.app"
 ```
 
 An unsigned local workaround for trusted self-use is:
 
 ```sh
-xattr -dr com.apple.quarantine "/Applications/Codex Account Switcher.app"
-open "/Applications/Codex Account Switcher.app"
+xattr -dr com.apple.quarantine "/Applications/Profile Switcher.app"
+open "/Applications/Profile Switcher.app"
 ```
 
 Do not present the workaround as the normal install path for public users; public macOS releases should be signed and notarized.
@@ -336,7 +340,7 @@ If the GitHub repository name changes, update both files and the release workflo
 
 1. Bump versions in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
 2. Commit the changes.
-3. Create and push a tag, for example `v0.1.14`.
+3. Create and push a tag, for example `v0.1.15`.
 4. GitHub Actions builds installers, updater archives, signatures, and release metadata.
 5. Review the draft release, then publish it.
 

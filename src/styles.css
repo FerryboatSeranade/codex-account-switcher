@@ -248,6 +248,156 @@ h3 {
   background: #0f8b7c;
 }
 
+.install-progress-panel {
+  display: grid;
+  gap: 12px;
+  max-width: 1280px;
+  margin: 0 auto 14px;
+  padding: 14px;
+  border: 1px solid #cfe2ff;
+  border-radius: 8px;
+  color: #183153;
+  background: #f7fbff;
+}
+
+.install-progress-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  width: 100%;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+}
+
+.install-progress-head h2 {
+  margin-bottom: 5px;
+  font-size: 20px;
+}
+
+.install-progress-head span {
+  display: block;
+  min-width: 0;
+  color: #4d596c;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.install-progress-head-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: #0f8b7c;
+}
+
+.install-progress-head-meta svg:last-child {
+  color: #647086;
+  transition: transform 160ms ease;
+}
+
+.install-progress-head-meta svg.expanded {
+  transform: rotate(180deg);
+}
+
+.install-progress-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.install-progress-item {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.install-progress-icon {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: #647086;
+  background: #eef2f7;
+}
+
+.install-progress-item.ok .install-progress-icon,
+.install-progress-item.finished .install-progress-icon {
+  color: #0d5f56;
+  background: #e8f8f5;
+}
+
+.install-progress-item.running .install-progress-icon {
+  color: #0f5fa8;
+  background: #eaf4ff;
+}
+
+.install-progress-item.warning .install-progress-icon {
+  color: #9a6700;
+  background: #fff7df;
+}
+
+.install-progress-item.error .install-progress-icon {
+  color: #8b1d1d;
+  background: #fff0f0;
+}
+
+.install-progress-content {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.install-progress-title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.install-progress-title strong {
+  color: #1c2738;
+  font-size: 13px;
+}
+
+.install-progress-title span,
+.install-progress-title time {
+  color: #647086;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.install-progress-item.ok .install-progress-title span,
+.install-progress-item.finished .install-progress-title span {
+  color: #0d5f56;
+}
+
+.install-progress-item.warning .install-progress-title span {
+  color: #9a6700;
+}
+
+.install-progress-item.error .install-progress-title span {
+  color: #8b1d1d;
+}
+
+.install-progress-content p {
+  color: #4d596c;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .workspace {
   display: grid;
   grid-template-columns: 360px 1fr;

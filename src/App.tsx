@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import {
@@ -113,6 +114,18 @@ type SystemProbeReport = {
   codex_ready_title: string;
   codex_ready_detail: string;
   checks: SystemProbeCheck[];
+};
+
+type InstallProgressStatus = "started" | "running" | "ok" | "warning" | "error" | "finished";
+
+type InstallProgressEntry = {
+  run_id: string;
+  order: number;
+  status: InstallProgressStatus;
+  step: string;
+  title: string;
+  detail: string;
+  timestamp: string;
 };
 
 type ActionFeedback = {
@@ -262,7 +275,16 @@ const probeStatusLabel: Record<SystemProbeStatus, string> = {
   error: "失败"
 };
 
-const appBuildLabel = "v0.1.16-system-rename";
+const installProgressStatusLabel: Record<InstallProgressStatus, string> = {
+  started: "开始",
+  running: "进行中",
+  ok: "完成",
+  warning: "需确认",
+  error: "失败",
+  finished: "结束"
+};
+
+const appBuildLabel = "v0.1.17-install-progress";
 const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const AUTO_UPDATE_LAST_CHECK_KEY = "codex-account-switcher:last-auto-update-check";
 
@@ -462,6 +484,8 @@ function App() {
   const [restartCodex, setRestartCodex] = useState(true);
   const [systemProbe, setSystemProbe] = useState<SystemProbeReport | null>(null);
   const [probeExpanded, setProbeExpanded] = useState(true);
+  const [installProgress, setInstallProgress] = useState<InstallProgressEntry[]>([]);
+  const [installProgressExpanded, setInstallProgressExpanded] = useState(true);
   const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
   const [downloadedBytes, setDownloadedBytes] = useState(0);
@@ -488,10 +512,19 @@ function App() {
   const clientPreference = state?.client_preference ?? "codex_app";
   const clientPreferenceInfo = clientPreferenceMeta[clientPreference];
   const manageCodexApp = clientPreference === "codex_app";
+  const activeInstallProgress = installProgress.length > 0;
+  const latestInstallProgress = activeInstallProgress
+    ? installProgress[installProgress.length - 1]
+    : null;
 
   function clearProbeReport() {
     setSystemProbe(null);
     setProbeExpanded(true);
+  }
+
+  function clearInstallProgress() {
+    setInstallProgress([]);
+    setInstallProgressExpanded(true);
   }
 
   async function load() {
@@ -525,6 +558,43 @@ function App() {
 
   useEffect(() => {
     load();
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    listen<InstallProgressEntry>("install_codex_progress", (event) => {
+      if (disposed) {
+        return;
+      }
+      const next = event.payload;
+      setInstallProgress((current) => {
+        const sameRun = current.length === 0 || current[current.length - 1].run_id === next.run_id;
+        const base = sameRun ? current : [];
+        return [...base, next].sort((left, right) => left.order - right.order);
+      });
+      setInstallProgressExpanded(true);
+    })
+      .then((dispose) => {
+        if (disposed) {
+          dispose();
+        } else {
+          unlisten = dispose;
+        }
+      })
+      .catch(() => {
+        // Progress is best-effort; the final report still contains the authoritative result.
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -934,6 +1004,7 @@ function App() {
     setNotice("");
     setLastAction(null);
     clearProbeReport();
+    clearInstallProgress();
     setBusy("detect-codex-env");
     try {
       if (!isTauriRuntime()) {
@@ -967,6 +1038,7 @@ function App() {
     setNotice("正在检测并安装 Codex 组件，这可能需要几分钟...");
     setLastAction(null);
     clearProbeReport();
+    clearInstallProgress();
     setBusy("install-codex-env");
     try {
       if (!isTauriRuntime()) {
@@ -1290,6 +1362,55 @@ function App() {
         </button>
       ) : (
         notice && <div className="notice-banner">{notice}</div>
+      )}
+
+      {activeInstallProgress && latestInstallProgress && (
+        <section className="install-progress-panel" role="status">
+          <button
+            className="install-progress-head"
+            type="button"
+            onClick={() => setInstallProgressExpanded((expanded) => !expanded)}
+            aria-expanded={installProgressExpanded}
+            title="展开/折叠安装进度"
+          >
+            <div>
+              <p className="eyebrow">Install Progress</p>
+              <h2>安装进度</h2>
+              <span>{latestInstallProgress.title}：{latestInstallProgress.detail}</span>
+            </div>
+            <div className="install-progress-head-meta">
+              {busy === "install-codex-env" ? <Loader2 className="spin" /> : <CheckCircle2 />}
+              <ChevronDown className={installProgressExpanded ? "expanded" : ""} />
+            </div>
+          </button>
+          {installProgressExpanded && (
+            <ol className="install-progress-list">
+              {installProgress.map((entry, index) => (
+                <li className={`install-progress-item ${entry.status}`} key={`${entry.run_id}-${entry.order}-${index}`}>
+                  <div className="install-progress-icon">
+                    {entry.status === "running" ? (
+                      <Loader2 className="spin" />
+                    ) : entry.status === "warning" || entry.status === "error" ? (
+                      <AlertTriangle />
+                    ) : entry.status === "started" ? (
+                      <Clock3 />
+                    ) : (
+                      <CheckCircle2 />
+                    )}
+                  </div>
+                  <div className="install-progress-content">
+                    <div className="install-progress-title">
+                      <strong>{entry.title}</strong>
+                      <span>{installProgressStatusLabel[entry.status]}</span>
+                      <time>{new Date(entry.timestamp).toLocaleTimeString()}</time>
+                    </div>
+                    <p>{entry.detail}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          )}
+        </section>
       )}
 
       {systemProbe && probeExpanded && (

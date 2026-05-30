@@ -182,6 +182,7 @@ The `安装 Codex` button checks and installs the local Codex toolchain, then wr
 
 Windows flow:
 
+- The UI subscribes to `install_codex_progress` events and shows a live step timeline while installation is running. Each platform reports step start, step result, and final summary so users can see whether the process is currently on `winget`, Node.js, Codex CLI, or Codex App.
 - If `winget` is missing, the switcher launches an elevated PowerShell repair script with:
   `Set-ExecutionPolicy -Scope Process Bypass -Force`,
   `Install-PackageProvider -Name NuGet -Force`,
@@ -340,7 +341,7 @@ If the GitHub repository name changes, update both files and the release workflo
 
 1. Bump versions in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
 2. Commit the changes.
-3. Create and push a tag, for example `v0.1.16`.
+3. Create and push a tag, for example `v0.1.17`.
 4. GitHub Actions builds installers, updater archives, signatures, and release metadata.
 5. Review the draft release, then publish it.
 

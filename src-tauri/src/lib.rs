@@ -15,6 +15,7 @@ use std::{
     thread,
     time::Duration,
 };
+use tauri::Emitter;
 use toml_edit::{value, DocumentMut, Item, Table};
 use uuid::Uuid;
 
@@ -246,6 +247,28 @@ struct SystemProbeReport {
     codex_ready_title: String,
     codex_ready_detail: String,
     checks: Vec<SystemProbeCheck>,
+}
+
+#[derive(Debug, Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum InstallProgressStatus {
+    Started,
+    Running,
+    Ok,
+    Warning,
+    Error,
+    Finished,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct InstallProgressEvent {
+    run_id: String,
+    order: usize,
+    status: InstallProgressStatus,
+    step: String,
+    title: String,
+    detail: String,
+    timestamp: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1396,6 +1419,111 @@ fn install_report(checks: Vec<SystemProbeCheck>) -> SystemProbeReport {
     }
 }
 
+fn emit_install_progress(
+    app: Option<&tauri::AppHandle>,
+    run_id: &str,
+    order: usize,
+    status: InstallProgressStatus,
+    step: &str,
+    title: &str,
+    detail: impl Into<String>,
+) {
+    if let Some(app) = app {
+        let _ = app.emit(
+            "install_codex_progress",
+            InstallProgressEvent {
+                run_id: run_id.to_string(),
+                order,
+                status,
+                step: step.to_string(),
+                title: title.to_string(),
+                detail: detail.into(),
+                timestamp: Utc::now(),
+            },
+        );
+    }
+}
+
+fn start_install_progress(app: Option<&tauri::AppHandle>, run_id: &str) {
+    emit_install_progress(
+        app,
+        run_id,
+        0,
+        InstallProgressStatus::Started,
+        "start",
+        "开始检测",
+        "正在检测并安装 Codex 组件。",
+    );
+}
+
+fn finish_install_progress(
+    app: Option<&tauri::AppHandle>,
+    run_id: &str,
+    report: &SystemProbeReport,
+) {
+    emit_install_progress(
+        app,
+        run_id,
+        999,
+        InstallProgressStatus::Finished,
+        "finish",
+        "流程完成",
+        report.summary.clone(),
+    );
+}
+
+fn progress_status_from_probe(status: SystemProbeStatus) -> InstallProgressStatus {
+    match status {
+        SystemProbeStatus::Ok => InstallProgressStatus::Ok,
+        SystemProbeStatus::Warning => InstallProgressStatus::Warning,
+        SystemProbeStatus::Error => InstallProgressStatus::Error,
+    }
+}
+
+fn run_install_step<F>(
+    app: Option<&tauri::AppHandle>,
+    run_id: &str,
+    order: usize,
+    step: &str,
+    title: &str,
+    detail: &str,
+    task: F,
+) -> SystemProbeCheck
+where
+    F: FnOnce() -> SystemProbeCheck,
+{
+    emit_install_progress(
+        app,
+        run_id,
+        order * 2 - 1,
+        InstallProgressStatus::Running,
+        step,
+        title,
+        detail,
+    );
+    let check = task();
+    emit_install_progress(
+        app,
+        run_id,
+        order * 2,
+        progress_status_from_probe(check.status),
+        step,
+        &check.title,
+        check.detail.clone(),
+    );
+    check
+}
+
+fn finish_install_report(
+    app: Option<&tauri::AppHandle>,
+    run_id: &str,
+    checks: Vec<SystemProbeCheck>,
+) -> SystemProbeReport {
+    let report = install_report(checks);
+    finish_install_progress(app, run_id, &report);
+    report
+}
+
 #[cfg(target_os = "windows")]
 fn windows_winget_version() -> Option<String> {
     command_version("winget", &["--version"])
@@ -1778,13 +1906,49 @@ fn ensure_windows_codex_app() -> SystemProbeCheck {
 }
 
 #[cfg(target_os = "windows")]
-fn install_codex_environment_impl() -> SystemProbeReport {
+fn install_codex_environment_impl(
+    app: Option<&tauri::AppHandle>,
+    run_id: &str,
+) -> SystemProbeReport {
+    start_install_progress(app, run_id);
     let mut checks = Vec::new();
-    checks.push(ensure_windows_winget());
-    checks.push(ensure_windows_node());
-    checks.push(ensure_windows_codex_cli());
-    checks.push(ensure_windows_codex_app());
-    install_report(checks)
+    checks.push(run_install_step(
+        app,
+        run_id,
+        1,
+        "winget",
+        "winget",
+        "正在检测 winget；缺失时会尝试拉起管理员修复脚本。",
+        ensure_windows_winget,
+    ));
+    checks.push(run_install_step(
+        app,
+        run_id,
+        2,
+        "node",
+        "Node.js",
+        "正在检测 Node.js；缺失时会通过 winget 安装 Node.js LTS。",
+        ensure_windows_node,
+    ));
+    checks.push(run_install_step(
+        app,
+        run_id,
+        3,
+        "codex_cli",
+        "Codex CLI",
+        "正在检测 Codex CLI；缺失时会优先使用 npm 安装，再尝试官方脚本。",
+        ensure_windows_codex_cli,
+    ));
+    checks.push(run_install_step(
+        app,
+        run_id,
+        4,
+        "codex_app",
+        "Codex App",
+        "正在检测 Codex 桌面版；缺失时会通过 Microsoft Store / winget 安装。",
+        ensure_windows_codex_app,
+    ));
+    finish_install_report(app, run_id, checks)
 }
 
 #[cfg(target_os = "macos")]
@@ -2054,12 +2218,40 @@ fn ensure_macos_codex_app() -> SystemProbeCheck {
 }
 
 #[cfg(target_os = "macos")]
-fn install_codex_environment_impl() -> SystemProbeReport {
+fn install_codex_environment_impl(
+    app: Option<&tauri::AppHandle>,
+    run_id: &str,
+) -> SystemProbeReport {
+    start_install_progress(app, run_id);
     let mut checks = Vec::new();
-    checks.push(ensure_macos_node());
-    checks.push(ensure_unix_codex_cli());
-    checks.push(ensure_macos_codex_app());
-    install_report(checks)
+    checks.push(run_install_step(
+        app,
+        run_id,
+        1,
+        "node",
+        "Node.js",
+        "正在检测 Node.js；缺失时会尝试通过 Homebrew 安装。",
+        ensure_macos_node,
+    ));
+    checks.push(run_install_step(
+        app,
+        run_id,
+        2,
+        "codex_cli",
+        "Codex CLI",
+        "正在检测 Codex CLI；缺失时会优先使用 npm 安装，再尝试官方脚本。",
+        ensure_unix_codex_cli,
+    ));
+    checks.push(run_install_step(
+        app,
+        run_id,
+        3,
+        "codex_app",
+        "Codex App",
+        "正在检测 Codex 桌面版；缺失时会下载并打开官方 DMG。",
+        ensure_macos_codex_app,
+    ));
+    finish_install_report(app, run_id, checks)
 }
 
 #[cfg(target_os = "linux")]
@@ -2146,23 +2338,59 @@ fn ensure_linux_codex_app() -> SystemProbeCheck {
 }
 
 #[cfg(target_os = "linux")]
-fn install_codex_environment_impl() -> SystemProbeReport {
+fn install_codex_environment_impl(
+    app: Option<&tauri::AppHandle>,
+    run_id: &str,
+) -> SystemProbeReport {
+    start_install_progress(app, run_id);
     let mut checks = Vec::new();
-    checks.push(ensure_linux_node());
-    checks.push(ensure_unix_codex_cli());
-    checks.push(ensure_linux_codex_app());
-    install_report(checks)
+    checks.push(run_install_step(
+        app,
+        run_id,
+        1,
+        "node",
+        "Node.js",
+        "正在检测 Node.js；缺失时会尝试使用系统包管理器安装。",
+        ensure_linux_node,
+    ));
+    checks.push(run_install_step(
+        app,
+        run_id,
+        2,
+        "codex_cli",
+        "Codex CLI",
+        "正在检测 Codex CLI；缺失时会优先使用 npm 安装，再尝试官方脚本。",
+        ensure_unix_codex_cli,
+    ));
+    checks.push(run_install_step(
+        app,
+        run_id,
+        3,
+        "codex_app",
+        "Codex App",
+        "正在确认 Linux 桌面版支持情况。",
+        ensure_linux_codex_app,
+    ));
+    finish_install_report(app, run_id, checks)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn install_codex_environment_impl() -> SystemProbeReport {
-    install_report(vec![system_probe_check(
-        SystemProbeStatus::Error,
-        "Codex 安装",
-        "自动安装功能目前支持 macOS、Windows 和 Linux。",
-        "当前系统暂不支持自动安装 Codex。".to_string(),
-        "请参考 OpenAI Codex 官方文档手动安装。",
-    )])
+fn install_codex_environment_impl(
+    app: Option<&tauri::AppHandle>,
+    run_id: &str,
+) -> SystemProbeReport {
+    start_install_progress(app, run_id);
+    finish_install_report(
+        app,
+        run_id,
+        vec![system_probe_check(
+            SystemProbeStatus::Error,
+            "Codex 安装",
+            "自动安装功能目前支持 macOS、Windows 和 Linux。",
+            "当前系统暂不支持自动安装 Codex。".to_string(),
+            "请参考 OpenAI Codex 官方文档手动安装。",
+        )],
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -4062,8 +4290,9 @@ fn detect_codex_environment() -> Result<SystemProbeReport, String> {
 }
 
 #[tauri::command]
-fn install_codex_environment() -> Result<SystemProbeReport, String> {
-    Ok(install_codex_environment_impl())
+fn install_codex_environment(app: tauri::AppHandle) -> Result<SystemProbeReport, String> {
+    let run_id = Uuid::new_v4().to_string();
+    Ok(install_codex_environment_impl(Some(&app), &run_id))
 }
 
 #[tauri::command]

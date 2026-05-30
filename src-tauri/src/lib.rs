@@ -1630,23 +1630,55 @@ fn windows_codex_app_installed() -> bool {
 fn windows_codex_app_id() -> Result<String, String> {
     let script = r#"
 $ErrorActionPreference = "Stop"
-$app = Get-StartApps |
-  Where-Object {
-    $_.Name -eq "Codex" -or
-    $_.Name -eq "Codex App" -or
-    $_.Name -match "(?i)OpenAI.*Codex" -or
-    $_.AppID -match "(?i)(^|[._-])Codex($|[._-])" -or
-    $_.AppID -match "(?i)OpenAI.*Codex"
-  } |
-  Select-Object -First 1
-if (-not $app) {
-  $package = Get-AppxPackage -Name "*Codex*" -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($package) {
-    $app = Get-StartApps |
-      Where-Object { $_.AppID -like "$($package.PackageFamilyName)!*" } |
-      Select-Object -First 1
+
+function Test-IsCodexSwitcher($entry) {
+  $name = [string]$entry.Name
+  $appId = [string]$entry.AppID
+  return (
+    $name -match "(?i)Codex Account Switcher|Account Switcher|切号器" -or
+    $appId -match "(?i)codex-account-switcher|com\.local\.codex-account-switcher|account-switcher"
+  )
+}
+
+$startApps = @(Get-StartApps | Where-Object { -not (Test-IsCodexSwitcher $_) })
+$packages = @(Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction SilentlyContinue)
+if ($packages.Count -eq 0) {
+  $packages = @(Get-AppxPackage -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.Name -eq "OpenAI.Codex" -or
+      $_.PackageFamilyName -like "OpenAI.Codex_*"
+    })
+}
+
+foreach ($package in $packages) {
+  $app = $startApps |
+    Where-Object { $_.AppID -like "$($package.PackageFamilyName)!*" } |
+    Select-Object -First 1
+  if ($app) {
+    $app.AppID
+    exit 0
   }
 }
+
+$app = $startApps |
+  Where-Object {
+    $_.Name -eq "Codex" -and (
+      $_.AppID -match "(?i)^OpenAI\.Codex_" -or
+      $_.AppID -match "(?i)9PLM9XGG6VKS"
+    )
+  } |
+  Select-Object -First 1
+
+if (-not $app) {
+  $app = $startApps |
+    Where-Object {
+      $_.Name -eq "Codex" -and
+      $_.AppID -match "!" -and
+      $_.AppID -notmatch "(?i)switcher|account-switcher|codex-account-switcher|com\.local"
+    } |
+    Select-Object -First 1
+}
+
 if (-not $app) { exit 1 }
 $app.AppID
 "#;
@@ -1687,12 +1719,12 @@ fn codex_windows_process_exists() -> Result<bool, String> {
 
 #[cfg(target_os = "windows")]
 fn ensure_windows_codex_app() -> SystemProbeCheck {
-    if windows_codex_app_installed() {
+    if let Ok(app_id) = windows_codex_app_id() {
         return system_probe_check(
             SystemProbeStatus::Ok,
             "Codex App",
             "Codex 桌面版需要通过 Microsoft Store / winget 安装。",
-            "已检测到 Windows Codex App。".to_string(),
+            format!("已检测到 Windows Codex App：{app_id}。"),
             "无需处理。",
         );
     }
@@ -1717,12 +1749,12 @@ fn ensure_windows_codex_app() -> SystemProbeCheck {
             "--accept-source-agreements",
         ],
     );
-    if windows_codex_app_installed() {
+    if let Ok(app_id) = windows_codex_app_id() {
         return system_probe_check(
             SystemProbeStatus::Ok,
             "Codex App",
             "Codex 桌面版需要通过 Microsoft Store / winget 安装。",
-            "已通过 winget install Codex -s msstore 安装并检测到 Codex App。".to_string(),
+            format!("已通过 winget install Codex -s msstore 安装并检测到 Codex App：{app_id}。"),
             "无需处理。",
         );
     }

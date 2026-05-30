@@ -1200,31 +1200,6 @@ fn windows_powershell_stdout(script: &str) -> Result<String, String> {
     })
 }
 
-#[cfg(target_os = "windows")]
-fn windows_process_exists(image_name: &str) -> Result<bool, String> {
-    let output = Command::new("tasklist")
-        .args(["/FI", &format!("IMAGENAME eq {image_name}"), "/NH"])
-        .output()
-        .map_err(|err| format!("执行 tasklist 失败：{err}"))?;
-    if !output.status.success() {
-        let stderr = decode_windows_output(&output.stderr);
-        return Err(if stderr.is_empty() {
-            format!("tasklist 退出码异常：{}", output.status)
-        } else {
-            stderr
-        });
-    }
-
-    let needle = image_name.to_ascii_lowercase();
-    let stdout = decode_windows_output(&output.stdout).to_ascii_lowercase();
-    Ok(stdout.lines().any(|line| line.contains(&needle)))
-}
-
-#[cfg(target_os = "windows")]
-fn codex_windows_process_exists() -> Result<bool, String> {
-    windows_process_exists("Codex.exe")
-}
-
 fn system_probe_check(
     status: SystemProbeStatus,
     title: &str,
@@ -1648,12 +1623,66 @@ fn ensure_windows_codex_cli() -> SystemProbeCheck {
 
 #[cfg(target_os = "windows")]
 fn windows_codex_app_installed() -> bool {
+    windows_codex_app_id().is_ok()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_codex_app_id() -> Result<String, String> {
     let script = r#"
-$startApp = Get-StartApps | Where-Object { $_.Name -eq "Codex" -or $_.AppID -match "Codex" } | Select-Object -First 1
-$package = Get-AppxPackage -Name "*Codex*" -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($startApp -or $package) { "installed" } else { exit 1 }
+$ErrorActionPreference = "Stop"
+$app = Get-StartApps |
+  Where-Object {
+    $_.Name -eq "Codex" -or
+    $_.Name -eq "Codex App" -or
+    $_.Name -match "(?i)OpenAI.*Codex" -or
+    $_.AppID -match "(?i)(^|[._-])Codex($|[._-])" -or
+    $_.AppID -match "(?i)OpenAI.*Codex"
+  } |
+  Select-Object -First 1
+if (-not $app) {
+  $package = Get-AppxPackage -Name "*Codex*" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($package) {
+    $app = Get-StartApps |
+      Where-Object { $_.AppID -like "$($package.PackageFamilyName)!*" } |
+      Select-Object -First 1
+  }
+}
+if (-not $app) { exit 1 }
+$app.AppID
 "#;
-    windows_powershell_stdout(script).is_ok()
+    let output = windows_powershell_stdout(script)?;
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "未能从 Windows Start menu 读取 Codex AppID".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_codex_app_process_ids() -> Result<Vec<String>, String> {
+    let script = r#"
+$ErrorActionPreference = "Stop"
+$processes = Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe'" |
+  Where-Object {
+    ($_.ExecutablePath -and ($_.ExecutablePath -match "(?i)\\WindowsApps\\" -or $_.ExecutablePath -match "(?i)\\Programs\\Codex\\" -or $_.ExecutablePath -match "(?i)Codex App")) -or
+    ($_.CommandLine -and ($_.CommandLine -match "(?i)\\WindowsApps\\" -or $_.CommandLine -match "(?i)Codex App" -or $_.CommandLine -match "(?i)ms-appx"))
+  } |
+  Select-Object -ExpandProperty ProcessId
+$processes
+"#;
+    let output = windows_powershell_stdout(script)?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+#[cfg(target_os = "windows")]
+fn codex_windows_process_exists() -> Result<bool, String> {
+    windows_codex_app_process_ids().map(|ids| !ids.is_empty())
 }
 
 #[cfg(target_os = "windows")]
@@ -2127,13 +2156,25 @@ fn quit_codex_process() -> Result<(), String> {
         Err(err) => failures.push(format!("检测 Codex.exe 进程失败：{err}")),
     }
 
-    let close_script = r#"
+    match windows_codex_app_process_ids() {
+        Ok(process_ids) if process_ids.is_empty() => return Ok(()),
+        Ok(process_ids) => {
+            for process_id in process_ids {
+                let close_script = format!(
+                    r#"
 $ErrorActionPreference = "SilentlyContinue"
-Get-Process -Name Codex | ForEach-Object { $_.CloseMainWindow() | Out-Null }
+$process = Get-Process -Id {} -ErrorAction SilentlyContinue
+if ($process) {{ $process.CloseMainWindow() | Out-Null }}
 Start-Sleep -Milliseconds 900
-"#;
-    if let Err(err) = windows_powershell_status(close_script) {
-        failures.push(format!("温和关闭失败：{err}"));
+"#,
+                    process_id
+                );
+                if let Err(err) = windows_powershell_status(&close_script) {
+                    failures.push(format!("温和关闭 PID {process_id} 失败：{err}"));
+                }
+            }
+        }
+        Err(err) => failures.push(format!("读取 Codex App 进程失败：{err}")),
     }
 
     match codex_windows_process_exists() {
@@ -2142,13 +2183,21 @@ Start-Sleep -Milliseconds 900
         Err(err) => failures.push(format!("温和关闭后检测进程失败：{err}")),
     }
 
-    match command_status_detail("taskkill", &["/F", "/T", "/IM", "Codex.exe"]) {
-        Ok(()) => any_success = true,
-        Err(err) => {
-            any_success = any_success || err.has_successful_termination();
-            access_denied = access_denied || err.is_access_denied();
-            failures.push(format!("taskkill 失败：{}", err.detail()));
+    match windows_codex_app_process_ids() {
+        Ok(process_ids) if process_ids.is_empty() => return Ok(()),
+        Ok(process_ids) => {
+            for process_id in process_ids {
+                match command_status_detail("taskkill", &["/F", "/T", "/PID", &process_id]) {
+                    Ok(()) => any_success = true,
+                    Err(err) => {
+                        any_success = any_success || err.has_successful_termination();
+                        access_denied = access_denied || err.is_access_denied();
+                        failures.push(format!("taskkill PID {process_id} 失败：{}", err.detail()));
+                    }
+                }
+            }
         }
+        Err(err) => failures.push(format!("读取 Codex App 进程失败：{err}")),
     }
     thread::sleep(Duration::from_millis(800));
 
@@ -2160,7 +2209,12 @@ Start-Sleep -Milliseconds 900
 
     let script = r#"
 $ErrorActionPreference = "Continue"
-Get-Process -Name Codex -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction Continue
+Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe'" |
+  Where-Object {
+    ($_.ExecutablePath -and ($_.ExecutablePath -match "(?i)\\WindowsApps\\" -or $_.ExecutablePath -match "(?i)\\Programs\\Codex\\" -or $_.ExecutablePath -match "(?i)Codex App")) -or
+    ($_.CommandLine -and ($_.CommandLine -match "(?i)\\WindowsApps\\" -or $_.CommandLine -match "(?i)Codex App" -or $_.CommandLine -match "(?i)ms-appx"))
+  } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction Continue }
 "#;
     match windows_powershell_status(script) {
         Ok(()) => any_success = true,
@@ -2237,17 +2291,17 @@ fn start_codex_process() -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn start_codex_process() -> Result<(), String> {
-    let script = r#"
+    let app_id = windows_codex_app_id()
+        .map_err(|err| format!("{err}。请先安装 Codex App，或通过“安装 Codex”按钮自动安装。"))?;
+    let script = format!(
+        r#"
 $ErrorActionPreference = "Stop"
-Start-Process Codex
-"#;
-    command_status_detail("cmd.exe", &["/C", "start", "", "Codex"])
-        .map_err(|err| err.detail())
-        .or_else(|cmd_err| {
-            windows_powershell_status(script)
-                .map_err(|ps_err| format!("cmd.exe: {cmd_err}；PowerShell: {ps_err}"))
-        })
-        .map_err(|err| format!("未能通过 Windows shell 启动 Codex app。详细：{err}"))
+Start-Process {uri}
+"#,
+        uri = ps_single_quote(&format!("shell:AppsFolder\\{app_id}"))
+    );
+    windows_powershell_status(&script)
+        .map_err(|err| format!("未能通过 Windows AppID 启动 Codex App（{app_id}）。详细：{err}"))
 }
 
 #[cfg(target_os = "linux")]

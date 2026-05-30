@@ -134,6 +134,7 @@ This keeps ChatGPT account profiles and API/proxy profiles looking at the same t
 - Switching mode does not hide, archive, copy, or restore threads.
 - Saved switcher profiles contain only `auth.json`/`config.toml` snapshots plus labels/notes.
 - The target client preference is stored in the switcher's `profiles.json` as `client_preference`. `codex_app` can close/reopen Codex App after writes. `vscode_extension` and `cli_other` only write `~/.codex` and then tell the user to reload VS Code or restart the CLI process.
+- On Windows, `codex_app` starts the desktop app through the Start menu AppID (`shell:AppsFolder\...`) instead of `start Codex`, because the plain command name can resolve to Codex CLI (`codex.cmd`/`codex.exe`) when CLI is on PATH.
 
 ## Reset Account State
 
@@ -335,7 +336,7 @@ If the GitHub repository name changes, update both files and the release workflo
 
 1. Bump versions in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
 2. Commit the changes.
-3. Create and push a tag, for example `v0.1.12`.
+3. Create and push a tag, for example `v0.1.13`.
 4. GitHub Actions builds installers, updater archives, signatures, and release metadata.
 5. Review the draft release, then publish it.
 

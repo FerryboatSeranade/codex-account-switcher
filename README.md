@@ -2,9 +2,9 @@
 
 This project manages local Codex Desktop/CLI state under `~/.codex`.
 
-Since v0.1.15 the installed app name is `Profile Switcher`, with bundle identifier `com.local.profile-switcher` and Windows executable name `profile-switcher.exe`. This avoids polluting Windows StartApps/launcher matching with another app named `Codex`. The tool still manages Codex state, and it intentionally keeps the existing local data folder named `codex-account-switcher` so old profiles/backups survive upgrades.
+Since v0.1.16 the installed app name is `Profile Switcher`, with bundle identifier `com.local.profile-switcher` and Windows executable name `profile-switcher.exe`. This avoids polluting Windows StartApps/launcher matching with another app named `Codex`. The tool still manages Codex state, and it intentionally keeps the existing local data folder named `codex-account-switcher` so old profiles/backups survive upgrades.
 
-Windows packaging keeps the previous MSI upgrade code so upgrades replace the old install instead of creating a duplicate app. The NSIS installer also removes legacy Start menu shortcuts named `Codex Account Switcher` during install/uninstall.
+Windows packaging keeps the previous MSI upgrade code so upgrades replace the old install instead of creating a duplicate app. The NSIS installer removes legacy Start menu shortcuts named `Codex Account Switcher` during install/uninstall, and the app also tries the same cleanup on startup so updater installs can shed old shortcuts too.
 
 ## Auth Modes
 
@@ -340,7 +340,7 @@ If the GitHub repository name changes, update both files and the release workflo
 
 1. Bump versions in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
 2. Commit the changes.
-3. Create and push a tag, for example `v0.1.15`.
+3. Create and push a tag, for example `v0.1.16`.
 4. GitHub Actions builds installers, updater archives, signatures, and release metadata.
 5. Review the draft release, then publish it.
 

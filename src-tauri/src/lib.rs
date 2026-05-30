@@ -4134,6 +4134,49 @@ fn quit_codex_app() -> Result<String, String> {
     Ok("已尝试关闭 Codex app".to_string())
 }
 
+fn cleanup_legacy_shortcuts_on_startup() {
+    #[cfg(target_os = "windows")]
+    cleanup_legacy_windows_start_menu_shortcuts();
+}
+
+#[cfg(target_os = "windows")]
+fn cleanup_legacy_windows_start_menu_shortcuts() {
+    let mut program_dirs = Vec::new();
+
+    if let Some(appdata) = env::var_os("APPDATA") {
+        program_dirs.push(
+            PathBuf::from(appdata)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs"),
+        );
+    }
+
+    if let Some(program_data) = env::var_os("PROGRAMDATA") {
+        program_dirs.push(
+            PathBuf::from(program_data)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs"),
+        );
+    }
+
+    for programs_dir in program_dirs {
+        let legacy_folder = programs_dir.join("Codex Account Switcher");
+        let legacy_shortcuts = [
+            programs_dir.join("Codex Account Switcher.lnk"),
+            legacy_folder.join("Codex Account Switcher.lnk"),
+        ];
+
+        for shortcut in legacy_shortcuts {
+            let _ = fs::remove_file(shortcut);
+        }
+        let _ = fs::remove_dir(legacy_folder);
+    }
+}
+
 #[tauri::command]
 fn restart_switcher_as_admin(app: tauri::AppHandle) -> Result<String, String> {
     restart_switcher_as_admin_process()?;
@@ -4145,6 +4188,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|_app| {
+            cleanup_legacy_shortcuts_on_startup();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_app_state,
             diagnose_codex_state,

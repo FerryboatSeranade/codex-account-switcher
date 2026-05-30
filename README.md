@@ -171,6 +171,35 @@ Permissions:
 
 hosts is exact-name mapping only. It does not support wildcard domains such as `*.example.com`; add each specific hostname that needs the local DNS override.
 
+## Install Codex Button
+
+The `安装 Codex` button checks and installs the local Codex toolchain, then writes a step-by-step report into the same expandable result panel used by environment diagnostics.
+
+Windows flow:
+
+- If `winget` is missing, the switcher launches an elevated PowerShell repair script with:
+  `Set-ExecutionPolicy -Scope Process Bypass -Force`,
+  `Install-PackageProvider -Name NuGet -Force`,
+  `Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery`,
+  and `Repair-WinGetPackageManager -AllUsers`.
+- If Node.js is missing, it runs `winget install --id OpenJS.NodeJS.LTS -e --accept-package-agreements --accept-source-agreements`.
+- If Codex CLI is missing, it first runs `npm install -g @openai/codex`; if npm is unavailable or fails, it falls back to OpenAI's Windows install script: `irm https://chatgpt.com/codex/install.ps1 | iex`.
+- If Codex App is missing, it runs the official Windows app command `winget install Codex -s msstore --accept-package-agreements --accept-source-agreements`.
+
+macOS flow:
+
+- If Node.js is missing and Homebrew is available, it runs `brew install node`.
+- If Codex CLI is missing, it runs `npm install -g @openai/codex`, then falls back to OpenAI's install script: `curl -fsSL https://chatgpt.com/codex/install.sh | sh`.
+- If Codex App is missing, it downloads the official OpenAI DMG for Apple Silicon or Intel and opens it for the user to finish installation.
+
+Linux flow:
+
+- If Node.js is missing, it tries common distro package managers (`apt-get`, `dnf`, `yum`, `pacman`, `zypper`) when root or passwordless sudo is available.
+- If Codex CLI is missing, it runs `npm install -g @openai/codex`, then falls back to OpenAI's install script.
+- Codex App is currently reported as manual/unsupported because OpenAI's Codex App download page only lists macOS and Windows installers.
+
+Some installers update PATH only for new processes. A warning result can still mean the install succeeded but the switcher must be restarted before `node`, `npm`, or `codex` is detected.
+
 ## gogoais API Key Fetch
 
 The `New Proxy` form can fetch a Codex proxy API key from gogoais by username and password.
@@ -306,7 +335,7 @@ If the GitHub repository name changes, update both files and the release workflo
 
 1. Bump versions in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
 2. Commit the changes.
-3. Create and push a tag, for example `v0.1.10`.
+3. Create and push a tag, for example `v0.1.11`.
 4. GitHub Actions builds installers, updater archives, signatures, and release metadata.
 5. Review the draft release, then publish it.
 

@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   Clock3,
   Code2,
+  Download,
   ExternalLink,
   FileText,
   FileKey2,
@@ -261,7 +262,7 @@ const probeStatusLabel: Record<SystemProbeStatus, string> = {
   error: "失败"
 };
 
-const appBuildLabel = "v0.1.10-api-profile-fix";
+const appBuildLabel = "v0.1.11-install-codex";
 const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const AUTO_UPDATE_LAST_CHECK_KEY = "codex-account-switcher:last-auto-update-check";
 
@@ -314,8 +315,11 @@ function needsAdminRestart(detail: string) {
 }
 
 function formatSystemProbeReport(report: SystemProbeReport) {
+  const reportTitle = report.codex_ready_title.includes("安装")
+    ? "Codex 安装/检测报告"
+    : "Codex 使用环境检测报告";
   const lines = [
-    "Codex 使用环境检测报告",
+    reportTitle,
     `生成时间：${report.generated_at}`,
     `结论：${report.codex_ready_title}`,
     `是否具备 Codex 使用环境条件：${report.codex_ready ? "是" : "否"}`,
@@ -958,6 +962,53 @@ function App() {
     }
   }
 
+  async function installCodexEnvironment() {
+    setError("");
+    setNotice("正在检测并安装 Codex 组件，这可能需要几分钟...");
+    setLastAction(null);
+    clearProbeReport();
+    setBusy("install-codex-env");
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("请在 Tauri 桌面窗口中安装 Codex");
+      }
+      const report = await invoke<SystemProbeReport>("install_codex_environment");
+      setSystemProbe(report);
+      setProbeExpanded(true);
+      try {
+        const clipboardMessage = await invoke<string>("copy_text_to_clipboard", {
+          text: formatSystemProbeReport(report)
+        });
+        const detail = `${report.summary} ${clipboardMessage}。`;
+        setNotice(detail);
+        setLastAction({
+          kind: report.codex_ready ? "success" : "info",
+          title: report.codex_ready ? "Codex 已就绪" : "Codex 安装已执行",
+          detail
+        });
+      } catch (clipboardErr) {
+        const detail = `${report.summary} 但复制到剪贴板失败：${String(clipboardErr)}`;
+        setNotice(report.summary);
+        setLastAction({
+          kind: report.codex_ready ? "success" : "info",
+          title: report.codex_ready ? "Codex 已就绪" : "Codex 安装已执行",
+          detail
+        });
+      }
+    } catch (err) {
+      const detail = String(err);
+      setError(detail);
+      setLastAction({
+        kind: "error",
+        title: "Codex 安装失败",
+        detail,
+        action: needsAdminRestart(detail) ? "restart-admin" : undefined
+      });
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function runUpdateCheck({ automatic = false } = {}) {
     if (automatic && autoUpdateCheckInFlight.current) {
       return;
@@ -1192,6 +1243,15 @@ function App() {
           >
             {busy === "detect-codex-env" ? <Loader2 className="spin" /> : <Activity />}
             检测 Codex 使用环境
+          </button>
+          <button
+            className="ghost topbar-action"
+            onClick={installCodexEnvironment}
+            disabled={!!busy}
+            title="检测并安装 Node.js、Codex CLI 和 Codex App"
+          >
+            {busy === "install-codex-env" ? <Loader2 className="spin" /> : <Download />}
+            安装 Codex
           </button>
           <button className="ghost topbar-action" onClick={checkForUpdates} disabled={!!busy}>
             {busy === "check-update" ? <Loader2 className="spin" /> : <Rocket />}

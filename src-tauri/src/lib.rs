@@ -221,7 +221,7 @@ struct ClientPreferenceResult {
     app_state: AppState,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum SystemProbeStatus {
     Ok,
@@ -805,7 +805,12 @@ fn account_mode_config(raw: Option<&str>) -> String {
     format!("{}\n", doc.to_string().trim_end())
 }
 
-fn proxy_base_config_document(model: &str, review_model: &str, effort: &str, provider: &str) -> DocumentMut {
+fn proxy_base_config_document(
+    model: &str,
+    review_model: &str,
+    effort: &str,
+    provider: &str,
+) -> DocumentMut {
     let mut doc = DocumentMut::new();
     doc["model_provider"] = value(provider);
     doc["model"] = value(model);
@@ -883,7 +888,8 @@ fn ensure_api_profile_files(profile: &mut Profile) -> Result<(), String> {
             profile.name
         )
     })?;
-    let model = extract_toml_value(&Some(config.clone()), "model").unwrap_or_else(|| "gpt-5.5".to_string());
+    let model =
+        extract_toml_value(&Some(config.clone()), "model").unwrap_or_else(|| "gpt-5.5".to_string());
     let review_model =
         extract_toml_value(&Some(config.clone()), "review_model").unwrap_or_else(|| model.clone());
     let effort = extract_toml_value(&Some(config.clone()), "model_reasoning_effort")
@@ -926,6 +932,82 @@ fn command_stdout(program: &str, args: &[&str]) -> Result<String, String> {
         });
     }
     Ok(command_output_text(&output.stdout))
+}
+
+fn command_version(program: &str, args: &[&str]) -> Option<String> {
+    command_stdout(program, args).ok().and_then(|output| {
+        output
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn command_succeeds(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn output_excerpt(text: &str, max_lines: usize) -> String {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        String::new()
+    } else {
+        lines
+            .iter()
+            .rev()
+            .take(max_lines)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" / ")
+    }
+}
+
+fn run_command_capture(program: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|err| format!("执行 {program} 失败：{err}"))?;
+    let stdout = command_output_text(&output.stdout);
+    let stderr = command_output_text(&output.stderr);
+    if output.status.success() {
+        let detail = output_excerpt(&stdout, 6);
+        return Ok(if detail.is_empty() {
+            format!("{program} 执行完成")
+        } else {
+            detail
+        });
+    }
+
+    let mut parts = Vec::new();
+    if !stdout.trim().is_empty() {
+        parts.push(format!("stdout: {}", output_excerpt(&stdout, 6)));
+    }
+    if !stderr.trim().is_empty() {
+        parts.push(format!("stderr: {}", output_excerpt(&stderr, 6)));
+    }
+    if parts.is_empty() {
+        Err(format!("{program} 退出码异常：{}", output.status))
+    } else {
+        Err(format!(
+            "{program} 退出码异常：{}；{}",
+            output.status,
+            parts.join("；")
+        ))
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1159,6 +1241,869 @@ fn system_probe_check(
     }
 }
 
+#[cfg(target_os = "windows")]
+fn windows_cmd_stdout(program: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("cmd.exe")
+        .arg("/C")
+        .arg(program)
+        .args(args)
+        .output()
+        .map_err(|err| format!("通过 cmd.exe 执行 {program} 失败：{err}"))?;
+    if !output.status.success() {
+        let stderr = command_output_text(&output.stderr);
+        let stdout = command_output_text(&output.stdout);
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("cmd.exe /C {program} 退出码异常：{}", output.status)
+        };
+        return Err(detail);
+    }
+    Ok(command_output_text(&output.stdout))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_cmd_version(program: &str, args: &[&str]) -> Option<String> {
+    windows_cmd_stdout(program, args).ok().and_then(|output| {
+        output
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(str::to_string)
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_cmd_succeeds(program: &str, args: &[&str]) -> bool {
+    Command::new("cmd.exe")
+        .arg("/C")
+        .arg(program)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_cmd_capture(program: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("cmd.exe")
+        .arg("/C")
+        .arg(program)
+        .args(args)
+        .output()
+        .map_err(|err| format!("通过 cmd.exe 执行 {program} 失败：{err}"))?;
+    let stdout = command_output_text(&output.stdout);
+    let stderr = command_output_text(&output.stderr);
+    if output.status.success() {
+        let detail = output_excerpt(&stdout, 6);
+        return Ok(if detail.is_empty() {
+            format!("{program} 执行完成")
+        } else {
+            detail
+        });
+    }
+
+    let mut parts = Vec::new();
+    if !stdout.trim().is_empty() {
+        parts.push(format!("stdout: {}", output_excerpt(&stdout, 6)));
+    }
+    if !stderr.trim().is_empty() {
+        parts.push(format!("stderr: {}", output_excerpt(&stderr, 6)));
+    }
+    if parts.is_empty() {
+        Err(format!(
+            "cmd.exe /C {program} 退出码异常：{}",
+            output.status
+        ))
+    } else {
+        Err(format!(
+            "cmd.exe /C {program} 退出码异常：{}；{}",
+            output.status,
+            parts.join("；")
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn node_version() -> Option<String> {
+    command_version("node", &["--version"]).or_else(|| windows_cmd_version("node", &["--version"]))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn node_version() -> Option<String> {
+    command_version("node", &["--version"])
+}
+
+#[cfg(target_os = "windows")]
+fn npm_version() -> Option<String> {
+    command_version("npm.cmd", &["--version"])
+        .or_else(|| command_version("npm", &["--version"]))
+        .or_else(|| windows_cmd_version("npm", &["--version"]))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn npm_version() -> Option<String> {
+    command_version("npm", &["--version"])
+}
+
+#[cfg(target_os = "windows")]
+fn codex_cli_version() -> Option<String> {
+    command_version("codex.cmd", &["--version"])
+        .or_else(|| command_version("codex", &["--version"]))
+        .or_else(|| windows_cmd_version("codex", &["--version"]))
+        .or_else(|| {
+            if command_succeeds("codex.cmd", &["--help"])
+                || command_succeeds("codex", &["--help"])
+                || windows_cmd_succeeds("codex", &["--help"])
+            {
+                Some("codex 可执行文件已存在".to_string())
+            } else {
+                None
+            }
+        })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn codex_cli_version() -> Option<String> {
+    command_version("codex", &["--version"]).or_else(|| {
+        if command_succeeds("codex", &["--help"]) {
+            Some("codex 可执行文件已存在".to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn install_report(checks: Vec<SystemProbeCheck>) -> SystemProbeReport {
+    let error_count = checks
+        .iter()
+        .filter(|check| matches!(check.status, SystemProbeStatus::Error))
+        .count();
+    let warning_count = checks
+        .iter()
+        .filter(|check| matches!(check.status, SystemProbeStatus::Warning))
+        .count();
+    let codex_ready = error_count == 0 && warning_count == 0;
+    let codex_ready_title = if codex_ready {
+        "Codex 安装环境：已就绪".to_string()
+    } else if error_count == 0 {
+        "Codex 安装环境：已处理，仍需用户确认".to_string()
+    } else {
+        "Codex 安装环境：仍有失败项".to_string()
+    };
+    let codex_ready_detail = if codex_ready {
+        "Node.js、Codex CLI 和当前平台的 Codex App 检测均已通过。".to_string()
+    } else if error_count == 0 {
+        "安装命令已经执行，但有项目需要重新打开终端/重启切号器，或完成系统安装器里的用户确认。"
+            .to_string()
+    } else {
+        "至少一个安装步骤失败。请按失败项的建议处理后，再点击安装 Codex 重试。".to_string()
+    };
+    let summary = if codex_ready {
+        "Codex 安装检查完成：所有关键组件已就绪。".to_string()
+    } else if error_count > 0 {
+        format!("Codex 安装检查完成：{error_count} 项失败，{warning_count} 项需要确认。")
+    } else {
+        format!("Codex 安装检查完成：没有失败项，{warning_count} 项需要确认。")
+    };
+
+    SystemProbeReport {
+        generated_at: Utc::now(),
+        summary,
+        codex_ready,
+        codex_ready_title,
+        codex_ready_detail,
+        checks,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_winget_version() -> Option<String> {
+    command_version("winget", &["--version"])
+        .or_else(|| windows_cmd_version("winget", &["--version"]))
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_script_as_admin(script: &str) -> Result<String, String> {
+    let script_path = env::temp_dir().join(format!(
+        "codex-account-switcher-winget-repair-{}.ps1",
+        Uuid::new_v4()
+    ));
+    fs::write(&script_path, script).map_err(|err| {
+        format!(
+            "写入临时管理员脚本失败：{}；路径：{}",
+            err,
+            script_path.to_string_lossy()
+        )
+    })?;
+    let script_path_text = script_path.to_string_lossy().to_string();
+    let launcher = format!(
+        r#"
+$ErrorActionPreference = "Stop"
+$process = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", {})
+if ($null -ne $process.ExitCode -and $process.ExitCode -ne 0) {{
+  throw "管理员脚本退出码 $($process.ExitCode)"
+}}
+"#,
+        ps_single_quote(&script_path_text)
+    );
+    let result = windows_powershell_status(&launcher)
+        .map(|_| "已通过管理员 PowerShell 执行 winget 修复脚本。".to_string());
+    let _ = fs::remove_file(script_path);
+    result
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_windows_winget() -> SystemProbeCheck {
+    if let Some(version) = windows_winget_version() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "winget",
+            "Windows 安装 Codex App 与 Node.js 需要 winget。",
+            format!("已检测到 winget：{version}。"),
+            "无需处理。",
+        );
+    }
+
+    let repair_script = r#"
+Set-ExecutionPolicy -Scope Process Bypass -Force
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+Install-PackageProvider -Name NuGet -Force | Out-Null
+Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery | Out-Null
+Repair-WinGetPackageManager -AllUsers
+"#;
+
+    match run_windows_script_as_admin(repair_script) {
+        Ok(message) => match windows_winget_version() {
+            Some(version) => system_probe_check(
+                SystemProbeStatus::Ok,
+                "winget",
+                "Windows 安装 Codex App 与 Node.js 需要 winget。",
+                format!("{message} 当前 winget：{version}。"),
+                "无需处理。",
+            ),
+            None => system_probe_check(
+                SystemProbeStatus::Warning,
+                "winget",
+                "Windows 安装 Codex App 与 Node.js 需要 winget。",
+                format!("{message} 但当前进程仍未检测到 winget。"),
+                "请重启切号器后再次点击安装 Codex；如果仍不行，确认系统 App Installer / Microsoft Store 是否可用。",
+            ),
+        },
+        Err(err) => system_probe_check(
+            SystemProbeStatus::Error,
+            "winget",
+            "Windows 安装 Codex App 与 Node.js 需要 winget。",
+            format!("未检测到 winget，且管理员修复脚本失败：{err}。"),
+            "请确认 UAC 弹窗已允许；若仍失败，请以管理员身份运行切号器，或手动安装 Microsoft App Installer 后重试。",
+        ),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_windows_node() -> SystemProbeCheck {
+    if let Some(version) = node_version() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Node.js",
+            "Codex CLI 的 npm 安装路径需要 Node.js LTS。",
+            format!("已检测到 Node.js：{version}。"),
+            "无需处理。",
+        );
+    }
+    if windows_winget_version().is_none() {
+        return system_probe_check(
+            SystemProbeStatus::Error,
+            "Node.js",
+            "Codex CLI 的 npm 安装路径需要 Node.js LTS。",
+            "未检测到 Node.js，且 winget 不可用，无法自动安装。".to_string(),
+            "先修复 winget，再重新点击安装 Codex。",
+        );
+    }
+
+    let install_result = windows_cmd_capture(
+        "winget",
+        &[
+            "install",
+            "--id",
+            "OpenJS.NodeJS.LTS",
+            "-e",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ],
+    );
+    match node_version() {
+        Some(version) => system_probe_check(
+            SystemProbeStatus::Ok,
+            "Node.js",
+            "Codex CLI 的 npm 安装路径需要 Node.js LTS。",
+            format!("已安装并检测到 Node.js：{version}。"),
+            "无需处理。",
+        ),
+        None => match install_result {
+            Ok(detail) => system_probe_check(
+                SystemProbeStatus::Warning,
+                "Node.js",
+                "Codex CLI 的 npm 安装路径需要 Node.js LTS。",
+                format!("winget 已执行 Node.js LTS 安装：{detail}。但当前进程还未检测到 node。"),
+                "请重启切号器或重新登录 Windows 后再检测；Windows 安装器有时需要刷新 PATH。",
+            ),
+            Err(err) => system_probe_check(
+                SystemProbeStatus::Error,
+                "Node.js",
+                "Codex CLI 的 npm 安装路径需要 Node.js LTS。",
+                format!("未检测到 Node.js，自动安装失败：{err}。"),
+                "请确认 winget 可以访问源；也可以手动安装 Node.js LTS 后重试。",
+            ),
+        },
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_windows_codex_cli() -> SystemProbeCheck {
+    if let Some(version) = codex_cli_version() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Codex CLI",
+            "需要 codex 命令可用，VS Code 扩展和终端用户也会依赖它。",
+            format!("已检测到 Codex CLI：{version}。"),
+            "无需处理。",
+        );
+    }
+
+    let npm_result = if npm_version().is_some() {
+        Some(windows_cmd_capture(
+            "npm",
+            &["install", "-g", "@openai/codex"],
+        ))
+    } else {
+        None
+    };
+    if let Some(version) = codex_cli_version() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Codex CLI",
+            "需要 codex 命令可用，VS Code 扩展和终端用户也会依赖它。",
+            format!("已通过 npm 安装并检测到 Codex CLI：{version}。"),
+            "无需处理。",
+        );
+    }
+
+    let installer_result = if npm_result.as_ref().is_none_or(|result| result.is_err()) {
+        let script = r#"irm https://chatgpt.com/codex/install.ps1 | iex"#;
+        Some(
+            windows_powershell_status(script)
+                .map(|_| "已执行官方 Codex CLI PowerShell 安装脚本。".to_string()),
+        )
+    } else {
+        None
+    };
+
+    if let Some(version) = codex_cli_version() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Codex CLI",
+            "需要 codex 命令可用，VS Code 扩展和终端用户也会依赖它。",
+            format!("已安装并检测到 Codex CLI：{version}。"),
+            "无需处理。",
+        );
+    }
+
+    let mut details = Vec::new();
+    match npm_result {
+        Some(Ok(detail)) => details.push(format!(
+            "npm install -g @openai/codex 已执行：{detail}，但当前 PATH 未检测到 codex。"
+        )),
+        Some(Err(err)) => details.push(format!("npm 安装失败：{err}。")),
+        None => details.push("未检测到 npm，已跳过 npm 安装路径。".to_string()),
+    }
+    if let Some(result) = installer_result {
+        match result {
+            Ok(detail) => details.push(format!("{detail} 但当前 PATH 未检测到 codex。")),
+            Err(err) => details.push(format!("官方 PowerShell 安装脚本失败：{err}。")),
+        }
+    }
+    let has_hard_error = details.iter().any(|detail| {
+        detail.contains("失败")
+            || detail.contains("未检测到 npm")
+            || detail.contains("not recognized")
+    });
+    system_probe_check(
+        if has_hard_error {
+            SystemProbeStatus::Error
+        } else {
+            SystemProbeStatus::Warning
+        },
+        "Codex CLI",
+        "需要 codex 命令可用，VS Code 扩展和终端用户也会依赖它。",
+        details.join(" "),
+        "请重启切号器/终端刷新 PATH 后重试；如果仍失败，请手动运行 npm install -g @openai/codex 或官方 PowerShell 安装脚本。",
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn windows_codex_app_installed() -> bool {
+    let script = r#"
+$startApp = Get-StartApps | Where-Object { $_.Name -eq "Codex" -or $_.AppID -match "Codex" } | Select-Object -First 1
+$package = Get-AppxPackage -Name "*Codex*" -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($startApp -or $package) { "installed" } else { exit 1 }
+"#;
+    windows_powershell_stdout(script).is_ok()
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_windows_codex_app() -> SystemProbeCheck {
+    if windows_codex_app_installed() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Codex App",
+            "Codex 桌面版需要通过 Microsoft Store / winget 安装。",
+            "已检测到 Windows Codex App。".to_string(),
+            "无需处理。",
+        );
+    }
+    if windows_winget_version().is_none() {
+        return system_probe_check(
+            SystemProbeStatus::Error,
+            "Codex App",
+            "Codex 桌面版需要通过 Microsoft Store / winget 安装。",
+            "未检测到 Codex App，且 winget 不可用，无法自动安装。".to_string(),
+            "先修复 winget，再重新点击安装 Codex；也可以打开 Microsoft Store 搜索 Codex。",
+        );
+    }
+
+    let install_result = windows_cmd_capture(
+        "winget",
+        &[
+            "install",
+            "Codex",
+            "-s",
+            "msstore",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ],
+    );
+    if windows_codex_app_installed() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Codex App",
+            "Codex 桌面版需要通过 Microsoft Store / winget 安装。",
+            "已通过 winget install Codex -s msstore 安装并检测到 Codex App。".to_string(),
+            "无需处理。",
+        );
+    }
+
+    match install_result {
+        Ok(detail) => system_probe_check(
+            SystemProbeStatus::Warning,
+            "Codex App",
+            "Codex 桌面版需要通过 Microsoft Store / winget 安装。",
+            format!("winget 已执行 Codex App 安装：{detail}。但当前仍未检测到 Codex App。"),
+            "请打开 Microsoft Store 的 Codex 安装页完成安装，或重启 Windows 后再次检测。",
+        ),
+        Err(err) => system_probe_check(
+            SystemProbeStatus::Error,
+            "Codex App",
+            "Codex 桌面版需要通过 Microsoft Store / winget 安装。",
+            format!("未检测到 Codex App，自动安装失败：{err}。"),
+            "请确认 Microsoft Store 可用；也可以手动运行 winget install Codex -s msstore。",
+        ),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn install_codex_environment_impl() -> SystemProbeReport {
+    let mut checks = Vec::new();
+    checks.push(ensure_windows_winget());
+    checks.push(ensure_windows_node());
+    checks.push(ensure_windows_codex_cli());
+    checks.push(ensure_windows_codex_app());
+    install_report(checks)
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_node() -> SystemProbeCheck {
+    if let Some(version) = node_version() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Node.js",
+            "Codex CLI 的 npm 安装路径需要 Node.js。",
+            format!("已检测到 Node.js：{version}。"),
+            "无需处理。",
+        );
+    }
+    if command_version("brew", &["--version"]).is_none() {
+        return system_probe_check(
+            SystemProbeStatus::Warning,
+            "Node.js",
+            "Codex CLI 的 npm 安装路径需要 Node.js。",
+            "未检测到 Node.js，也未检测到 Homebrew，无法自动安装 Node.js。".to_string(),
+            "请先安装 Homebrew 或 Node.js LTS，然后再次点击安装 Codex。",
+        );
+    }
+
+    let install_result = run_command_capture("brew", &["install", "node"]);
+    match node_version() {
+        Some(version) => system_probe_check(
+            SystemProbeStatus::Ok,
+            "Node.js",
+            "Codex CLI 的 npm 安装路径需要 Node.js。",
+            format!("已通过 Homebrew 安装并检测到 Node.js：{version}。"),
+            "无需处理。",
+        ),
+        None => match install_result {
+            Ok(detail) => system_probe_check(
+                SystemProbeStatus::Warning,
+                "Node.js",
+                "Codex CLI 的 npm 安装路径需要 Node.js。",
+                format!("brew install node 已执行：{detail}。但当前进程还未检测到 node。"),
+                "请重启切号器或终端后再次检测。",
+            ),
+            Err(err) => system_probe_check(
+                SystemProbeStatus::Error,
+                "Node.js",
+                "Codex CLI 的 npm 安装路径需要 Node.js。",
+                format!("未检测到 Node.js，Homebrew 安装失败：{err}。"),
+                "请检查 Homebrew 网络和权限，或手动安装 Node.js LTS。",
+            ),
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_unix_codex_cli() -> SystemProbeCheck {
+    if let Some(version) = codex_cli_version() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Codex CLI",
+            "需要 codex 命令可用。",
+            format!("已检测到 Codex CLI：{version}。"),
+            "无需处理。",
+        );
+    }
+
+    let npm_result = if npm_version().is_some() {
+        Some(run_command_capture(
+            "npm",
+            &["install", "-g", "@openai/codex"],
+        ))
+    } else {
+        None
+    };
+    if let Some(version) = codex_cli_version() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Codex CLI",
+            "需要 codex 命令可用。",
+            format!("已通过 npm 安装并检测到 Codex CLI：{version}。"),
+            "无需处理。",
+        );
+    }
+
+    let script_result = run_command_capture(
+        "sh",
+        &[
+            "-lc",
+            "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+        ],
+    );
+    if let Some(version) = codex_cli_version() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Codex CLI",
+            "需要 codex 命令可用。",
+            format!("已通过官方安装脚本安装并检测到 Codex CLI：{version}。"),
+            "无需处理。",
+        );
+    }
+
+    let mut details = Vec::new();
+    match npm_result {
+        Some(Ok(detail)) => details.push(format!(
+            "npm install -g @openai/codex 已执行：{detail}，但当前 PATH 未检测到 codex。"
+        )),
+        Some(Err(err)) => details.push(format!("npm 安装失败：{err}。")),
+        None => details.push("未检测到 npm，已跳过 npm 安装路径。".to_string()),
+    }
+    match script_result {
+        Ok(detail) => details.push(format!(
+            "官方安装脚本已执行：{detail}，但当前 PATH 未检测到 codex。"
+        )),
+        Err(err) => details.push(format!("官方安装脚本失败：{err}。")),
+    }
+    system_probe_check(
+        SystemProbeStatus::Warning,
+        "Codex CLI",
+        "需要 codex 命令可用。",
+        details.join(" "),
+        "请重启切号器/终端刷新 PATH 后重试；也可以手动运行 curl -fsSL https://chatgpt.com/codex/install.sh | sh 或 npm install -g @openai/codex。",
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_unix_codex_cli() -> SystemProbeCheck {
+    if let Some(version) = codex_cli_version() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Codex CLI",
+            "需要 codex 命令可用。",
+            format!("已检测到 Codex CLI：{version}。"),
+            "无需处理。",
+        );
+    }
+
+    let npm_result = if npm_version().is_some() {
+        Some(run_command_capture(
+            "npm",
+            &["install", "-g", "@openai/codex"],
+        ))
+    } else {
+        None
+    };
+    if let Some(version) = codex_cli_version() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Codex CLI",
+            "需要 codex 命令可用。",
+            format!("已通过 npm 安装并检测到 Codex CLI：{version}。"),
+            "无需处理。",
+        );
+    }
+
+    let script_result = run_command_capture(
+        "sh",
+        &[
+            "-lc",
+            "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+        ],
+    );
+    if let Some(version) = codex_cli_version() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Codex CLI",
+            "需要 codex 命令可用。",
+            format!("已通过官方安装脚本安装并检测到 Codex CLI：{version}。"),
+            "无需处理。",
+        );
+    }
+
+    let mut details = Vec::new();
+    match npm_result {
+        Some(Ok(detail)) => details.push(format!(
+            "npm install -g @openai/codex 已执行：{detail}，但当前 PATH 未检测到 codex。"
+        )),
+        Some(Err(err)) => details.push(format!("npm 安装失败：{err}。")),
+        None => details.push("未检测到 npm，已跳过 npm 安装路径。".to_string()),
+    }
+    match script_result {
+        Ok(detail) => details.push(format!(
+            "官方安装脚本已执行：{detail}，但当前 PATH 未检测到 codex。"
+        )),
+        Err(err) => details.push(format!("官方安装脚本失败：{err}。")),
+    }
+    system_probe_check(
+        SystemProbeStatus::Warning,
+        "Codex CLI",
+        "需要 codex 命令可用。",
+        details.join(" "),
+        "请重启切号器/终端刷新 PATH 后重试；也可以手动运行 curl -fsSL https://chatgpt.com/codex/install.sh | sh 或 npm install -g @openai/codex。",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_codex_app_installed() -> bool {
+    command_succeeds("open", &["-Ra", "Codex"])
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_codex_app() -> SystemProbeCheck {
+    if macos_codex_app_installed() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Codex App",
+            "macOS 桌面版需要安装 Codex.app。",
+            "已检测到 macOS Codex App。".to_string(),
+            "无需处理。",
+        );
+    }
+    let arch = command_stdout("uname", &["-m"]).unwrap_or_default();
+    let (url, filename, label) = if arch.trim() == "x86_64" {
+        (
+            "https://persistent.oaistatic.com/codex-app-prod/Codex-latest-x64.dmg",
+            "Codex-latest-x64.dmg",
+            "Intel",
+        )
+    } else {
+        (
+            "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg",
+            "Codex-latest-arm64.dmg",
+            "Apple Silicon",
+        )
+    };
+    let dmg_path = env::temp_dir().join(filename);
+    let dmg_text = dmg_path.to_string_lossy().to_string();
+    match run_command_capture("curl", &["-L", "--fail", "-o", &dmg_text, url]) {
+        Ok(detail) => match Command::new("open").arg(&dmg_path).status() {
+            Ok(status) if status.success() => system_probe_check(
+                SystemProbeStatus::Warning,
+                "Codex App",
+                "macOS 桌面版需要安装 Codex.app。",
+                format!(
+                    "已下载并打开官方 macOS {label} 安装包：{}。curl 输出：{}。",
+                    dmg_path.to_string_lossy(),
+                    detail
+                ),
+                "请在打开的 DMG 中完成安装，然后重新点击检测或安装 Codex。",
+            ),
+            Ok(status) => system_probe_check(
+                SystemProbeStatus::Error,
+                "Codex App",
+                "macOS 桌面版需要安装 Codex.app。",
+                format!(
+                    "已下载官方 macOS {label} 安装包，但 open 返回异常：{}；路径：{}。",
+                    status,
+                    dmg_path.to_string_lossy()
+                ),
+                "请手动打开该 DMG 完成安装，或访问 OpenAI Codex App 下载页。",
+            ),
+            Err(err) => system_probe_check(
+                SystemProbeStatus::Error,
+                "Codex App",
+                "macOS 桌面版需要安装 Codex.app。",
+                format!(
+                    "已下载官方 macOS {label} 安装包，但打开失败：{err}；路径：{}。",
+                    dmg_path.to_string_lossy()
+                ),
+                "请手动打开该 DMG 完成安装，或访问 OpenAI Codex App 下载页。",
+            ),
+        },
+        Err(err) => system_probe_check(
+            SystemProbeStatus::Error,
+            "Codex App",
+            "macOS 桌面版需要安装 Codex.app。",
+            format!("未检测到 Codex App，下载安装包失败：{err}。"),
+            "请确认网络可访问 persistent.oaistatic.com，或手动访问 OpenAI Codex App 下载页。",
+        ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_codex_environment_impl() -> SystemProbeReport {
+    let mut checks = Vec::new();
+    checks.push(ensure_macos_node());
+    checks.push(ensure_unix_codex_cli());
+    checks.push(ensure_macos_codex_app());
+    install_report(checks)
+}
+
+#[cfg(target_os = "linux")]
+fn install_linux_node_with_manager() -> Result<String, String> {
+    let script = r#"
+set -e
+run_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    echo "需要 root 或免密 sudo 才能自动安装 Node.js" >&2
+    exit 77
+  fi
+}
+if command -v apt-get >/dev/null 2>&1; then
+  run_root apt-get update
+  run_root apt-get install -y nodejs npm
+elif command -v dnf >/dev/null 2>&1; then
+  run_root dnf install -y nodejs npm
+elif command -v yum >/dev/null 2>&1; then
+  run_root yum install -y nodejs npm
+elif command -v pacman >/dev/null 2>&1; then
+  run_root pacman -Sy --noconfirm nodejs npm
+elif command -v zypper >/dev/null 2>&1; then
+  run_root zypper --non-interactive install nodejs npm
+else
+  echo "未找到 apt-get/dnf/yum/pacman/zypper" >&2
+  exit 78
+fi
+"#;
+    run_command_capture("sh", &["-lc", script])
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_linux_node() -> SystemProbeCheck {
+    if let Some(version) = node_version() {
+        return system_probe_check(
+            SystemProbeStatus::Ok,
+            "Node.js",
+            "Codex CLI 的 npm 安装路径需要 Node.js。",
+            format!("已检测到 Node.js：{version}。"),
+            "无需处理。",
+        );
+    }
+    let install_result = install_linux_node_with_manager();
+    match node_version() {
+        Some(version) => system_probe_check(
+            SystemProbeStatus::Ok,
+            "Node.js",
+            "Codex CLI 的 npm 安装路径需要 Node.js。",
+            format!("已通过系统包管理器安装并检测到 Node.js：{version}。"),
+            "无需处理。",
+        ),
+        None => match install_result {
+            Ok(detail) => system_probe_check(
+                SystemProbeStatus::Warning,
+                "Node.js",
+                "Codex CLI 的 npm 安装路径需要 Node.js。",
+                format!("系统包管理器安装命令已执行：{detail}。但当前进程还未检测到 node。"),
+                "请重启切号器或终端后再次检测。",
+            ),
+            Err(err) => system_probe_check(
+                SystemProbeStatus::Warning,
+                "Node.js",
+                "Codex CLI 的 npm 安装路径需要 Node.js。",
+                format!("未检测到 Node.js，自动安装未完成：{err}。"),
+                "请用系统包管理器手动安装 Node.js/npm，或用官方 Codex CLI 安装脚本继续使用 CLI。",
+            ),
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_linux_codex_app() -> SystemProbeCheck {
+    system_probe_check(
+        SystemProbeStatus::Warning,
+        "Codex App",
+        "OpenAI Codex 桌面版当前官方页面只提供 macOS 和 Windows 下载。",
+        "Linux 暂未配置桌面版自动安装；已优先安装/检测 Codex CLI。".to_string(),
+        "Linux 用户通常使用 Codex CLI、IDE 扩展，或等待官方桌面版支持。",
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn install_codex_environment_impl() -> SystemProbeReport {
+    let mut checks = Vec::new();
+    checks.push(ensure_linux_node());
+    checks.push(ensure_unix_codex_cli());
+    checks.push(ensure_linux_codex_app());
+    install_report(checks)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn install_codex_environment_impl() -> SystemProbeReport {
+    install_report(vec![system_probe_check(
+        SystemProbeStatus::Error,
+        "Codex 安装",
+        "自动安装功能目前支持 macOS、Windows 和 Linux。",
+        "当前系统暂不支持自动安装 Codex。".to_string(),
+        "请参考 OpenAI Codex 官方文档手动安装。",
+    )])
+}
+
 #[cfg(target_os = "macos")]
 fn quit_codex_process() -> Result<(), String> {
     let _ = Command::new("osascript")
@@ -1335,8 +2280,12 @@ fn restart_codex_process() -> Result<(), String> {
 fn client_refresh_hint(preference: &ClientPreference) -> &'static str {
     match preference {
         ClientPreference::CodexApp => "Codex App 已自动处理。",
-        ClientPreference::VscodeExtension => "请在 VS Code 中执行 Reload Window，或重启 VS Code 后让 Codex 扩展重新读取 ~/.codex。",
-        ClientPreference::CliOther => "请重启当前终端里的 Codex CLI/相关进程，让它重新读取 ~/.codex。",
+        ClientPreference::VscodeExtension => {
+            "请在 VS Code 中执行 Reload Window，或重启 VS Code 后让 Codex 扩展重新读取 ~/.codex。"
+        }
+        ClientPreference::CliOther => {
+            "请重启当前终端里的 Codex CLI/相关进程，让它重新读取 ~/.codex。"
+        }
     }
 }
 
@@ -1632,7 +2581,10 @@ fn restore_account_mode() -> Result<RestoreAccountModeResult, String> {
         "已恢复官方账号体系并移除中转 Base URL/API Key；未找到保存的登录 tokens，请在 Codex 里重新登录。"
             .to_string()
     };
-    let message = format!("{base_message} {}", client_refresh_hint(&store.client_preference));
+    let message = format!(
+        "{base_message} {}",
+        client_refresh_hint(&store.client_preference)
+    );
 
     Ok(RestoreAccountModeResult {
         message,
@@ -1715,11 +2667,17 @@ fn delete_codex_file(name: String) -> Result<DeleteCodexFileResult, String> {
     let message = if removed.is_some() && should_manage_codex_app(&store.client_preference) {
         format!("已停止 Codex App 并删除 {name}")
     } else if removed.is_some() {
-        format!("已备份并删除 {name}。{}", client_refresh_hint(&store.client_preference))
+        format!(
+            "已备份并删除 {name}。{}",
+            client_refresh_hint(&store.client_preference)
+        )
     } else if should_manage_codex_app(&store.client_preference) {
         format!("已停止 Codex App；{name} 不存在，无需删除")
     } else {
-        format!("{name} 不存在，无需删除。{}", client_refresh_hint(&store.client_preference))
+        format!(
+            "{name} 不存在，无需删除。{}",
+            client_refresh_hint(&store.client_preference)
+        )
     };
     Ok(DeleteCodexFileResult {
         message,
@@ -1841,8 +2799,7 @@ fn create_proxy_profile(input: ProxyProfileInput) -> Result<AppState, String> {
             let (_, current_auth) = current_files()?;
             let current_mode = auth_mode(&current_auth);
             if current_mode == "ChatGPT 登录授权" {
-                current_auth
-                    .unwrap_or_else(|| api_auth_json(api_key))
+                current_auth.unwrap_or_else(|| api_auth_json(api_key))
             } else if api_key.is_empty() {
                 return Err(
                     "当前没有 ChatGPT 登录授权；请先导入/登录账号，或填写 API Key 作为兜底"
@@ -1977,10 +2934,7 @@ fn switch_profile_and_restart(input: SwitchInput) -> Result<SwitchProfileResult,
     } else {
         format!("已切换档案。{}", client_refresh_hint(&preference))
     };
-    Ok(SwitchProfileResult {
-        message,
-        app_state,
-    })
+    Ok(SwitchProfileResult { message, app_state })
 }
 
 #[tauri::command]
@@ -3022,6 +3976,11 @@ fn detect_codex_environment() -> Result<SystemProbeReport, String> {
 }
 
 #[tauri::command]
+fn install_codex_environment() -> Result<SystemProbeReport, String> {
+    Ok(install_codex_environment_impl())
+}
+
+#[tauri::command]
 fn copy_text_to_clipboard(text: String) -> Result<String, String> {
     if text.trim().is_empty() {
         return Err("没有可复制的检测结果".to_string());
@@ -3121,6 +4080,7 @@ pub fn run() {
             open_hosts_file,
             detect_codex_environment,
             detect_system_network,
+            install_codex_environment,
             copy_text_to_clipboard,
             quit_codex_app,
             restart_codex_app,
@@ -3179,7 +4139,10 @@ mod tests {
         let config = proxy_api_config("gpt-5.5", "gpt-5.5", "xhigh", "https://code.gogoais.com");
         assert!(config.contains("model_provider = \"OpenAI\""), "{config}");
         assert!(config.contains("[model_providers.OpenAI]"), "{config}");
-        assert!(config.contains("base_url = \"https://code.gogoais.com/v1\""), "{config}");
+        assert!(
+            config.contains("base_url = \"https://code.gogoais.com/v1\""),
+            "{config}"
+        );
         assert!(config.contains("wire_api = \"responses\""), "{config}");
         assert!(config.contains("requires_openai_auth = true"), "{config}");
         assert!(!config.contains("openai_base_url"), "{config}");

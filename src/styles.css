@@ -60,9 +60,12 @@ svg {
 
 .topbar-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   align-items: center;
+  justify-content: flex-end;
   flex: 0 0 auto;
+  max-width: 760px;
 }
 
 .eyebrow {
@@ -930,7 +933,7 @@ textarea:focus {
 }
 
 .topbar-action {
-  min-width: 126px;
+  min-width: 118px;
 }
 
 .danger {

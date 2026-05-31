@@ -123,12 +123,17 @@ type InstallProgressEntry = {
   order: number;
   status: InstallProgressStatus;
   step: string;
+  parent_step?: string | null;
   title: string;
   detail: string;
   timestamp: string;
 };
 
 const installProgressTerminalStatuses: InstallProgressStatus[] = ["ok", "warning", "error", "finished"];
+
+type GroupedInstallProgressEntry = InstallProgressEntry & {
+  children: InstallProgressEntry[];
+};
 
 type ActionFeedback = {
   kind: "success" | "info" | "error";
@@ -286,9 +291,22 @@ const installProgressStatusLabel: Record<InstallProgressStatus, string> = {
   finished: "结束"
 };
 
-const appBuildLabel = "v0.1.20-windows-install-policy";
+const appBuildLabel = "v0.1.21-install-substeps";
 const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const AUTO_UPDATE_LAST_CHECK_KEY = "codex-account-switcher:last-auto-update-check";
+
+function sortInstallProgress(left: InstallProgressEntry, right: InstallProgressEntry) {
+  return left.order - right.order;
+}
+
+function groupInstallProgress(entries: InstallProgressEntry[]): GroupedInstallProgressEntry[] {
+  const sorted = [...entries].sort(sortInstallProgress);
+  const parentEntries = sorted.filter((entry) => !entry.parent_step);
+  return parentEntries.map((entry) => ({
+    ...entry,
+    children: sorted.filter((child) => child.parent_step === entry.step)
+  }));
+}
 
 function readLastAutoUpdateCheck() {
   try {
@@ -515,8 +533,12 @@ function App() {
   const clientPreferenceInfo = clientPreferenceMeta[clientPreference];
   const manageCodexApp = clientPreference === "codex_app";
   const activeInstallProgress = installProgress.length > 0;
+  const groupedInstallProgress = useMemo(
+    () => groupInstallProgress(installProgress),
+    [installProgress]
+  );
   const latestInstallProgress = activeInstallProgress
-    ? [...installProgress].sort((left, right) => left.order - right.order)[installProgress.length - 1]
+    ? [...installProgress].sort(sortInstallProgress)[installProgress.length - 1]
     : null;
 
   function clearProbeReport() {
@@ -579,7 +601,9 @@ function App() {
         const sameRun = current.length === 0 || current[current.length - 1].run_id === next.run_id;
         const base = sameRun ? current : [];
         const updated = [...base];
-        const sameStepIndex = updated.findIndex((entry) => entry.step === next.step);
+        const sameStepIndex = updated.findIndex(
+          (entry) => entry.step === next.step && (entry.parent_step ?? null) === (next.parent_step ?? null)
+        );
         if (sameStepIndex >= 0) {
           const currentStep = updated[sameStepIndex];
           const currentStepIsFinal = installProgressTerminalStatuses.includes(currentStep.status);
@@ -589,7 +613,7 @@ function App() {
         } else {
           updated.push(next);
         }
-        return updated.sort((left, right) => left.order - right.order);
+        return updated.sort(sortInstallProgress);
       });
       setInstallProgressExpanded(true);
     })
@@ -1407,8 +1431,8 @@ function App() {
           </button>
           {installProgressExpanded && (
             <ol className="install-progress-list">
-              {installProgress.map((entry, index) => (
-                <li className={`install-progress-item ${entry.status}`} key={`${entry.run_id}-${entry.order}-${index}`}>
+              {groupedInstallProgress.map((entry, index) => (
+                <li className={`install-progress-item ${entry.status}`} key={`${entry.run_id}-${entry.step}-${index}`}>
                   <div className="install-progress-icon">
                     {entry.status === "running" ? (
                       <Loader2 className="spin" />
@@ -1427,6 +1451,33 @@ function App() {
                       <time>{new Date(entry.timestamp).toLocaleTimeString()}</time>
                     </div>
                     <p>{entry.detail}</p>
+                    {entry.children.length > 0 && (
+                      <ol className="install-progress-children">
+                        {entry.children.map((child) => (
+                          <li className={`install-progress-child ${child.status}`} key={`${child.run_id}-${child.step}`}>
+                            <div className="install-progress-child-icon">
+                              {child.status === "running" ? (
+                                <Loader2 className="spin" />
+                              ) : child.status === "warning" || child.status === "error" ? (
+                                <AlertTriangle />
+                              ) : child.status === "started" ? (
+                                <Clock3 />
+                              ) : (
+                                <CheckCircle2 />
+                              )}
+                            </div>
+                            <div className="install-progress-child-content">
+                              <div className="install-progress-child-title">
+                                <strong>{child.title}</strong>
+                                <span>{installProgressStatusLabel[child.status]}</span>
+                                <time>{new Date(child.timestamp).toLocaleTimeString()}</time>
+                              </div>
+                              <p>{child.detail}</p>
+                            </div>
+                          </li>
+                        ))}
+                      </ol>
+                    )}
                   </div>
                 </li>
               ))}

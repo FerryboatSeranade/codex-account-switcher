@@ -266,6 +266,7 @@ struct InstallProgressEvent {
     order: usize,
     status: InstallProgressStatus,
     step: String,
+    parent_step: Option<String>,
     title: String,
     detail: String,
     timestamp: DateTime<Utc>,
@@ -1437,6 +1438,7 @@ fn emit_install_progress(
     order: usize,
     status: InstallProgressStatus,
     step: &str,
+    parent_step: Option<&str>,
     title: &str,
     detail: impl Into<String>,
 ) {
@@ -1448,6 +1450,7 @@ fn emit_install_progress(
                 order,
                 status,
                 step: step.to_string(),
+                parent_step: parent_step.map(str::to_string),
                 title: title.to_string(),
                 detail: detail.into(),
                 timestamp: Utc::now(),
@@ -1463,6 +1466,7 @@ fn start_install_progress(app: Option<&tauri::AppHandle>, run_id: &str) {
         0,
         InstallProgressStatus::Started,
         "start",
+        None,
         "开始检测",
         "正在检测并安装 Codex 组件。",
     );
@@ -1479,6 +1483,7 @@ fn finish_install_progress(
         999,
         InstallProgressStatus::Finished,
         "finish",
+        None,
         "流程完成",
         report.summary.clone(),
     );
@@ -1490,6 +1495,29 @@ fn progress_status_from_probe(status: SystemProbeStatus) -> InstallProgressStatu
         SystemProbeStatus::Warning => InstallProgressStatus::Warning,
         SystemProbeStatus::Error => InstallProgressStatus::Error,
     }
+}
+
+#[cfg(target_os = "windows")]
+fn emit_install_sub_progress(
+    app: Option<&tauri::AppHandle>,
+    run_id: &str,
+    order: usize,
+    status: InstallProgressStatus,
+    parent_step: &str,
+    sub_step: &str,
+    title: &str,
+    detail: impl Into<String>,
+) {
+    emit_install_progress(
+        app,
+        run_id,
+        order,
+        status,
+        &format!("{parent_step}.{sub_step}"),
+        Some(parent_step),
+        title,
+        detail,
+    );
 }
 
 fn run_install_step<F>(
@@ -1510,6 +1538,7 @@ where
         order * 2 - 1,
         InstallProgressStatus::Running,
         step,
+        None,
         title,
         detail,
     );
@@ -1520,6 +1549,44 @@ where
         order * 2,
         progress_status_from_probe(check.status),
         step,
+        None,
+        &check.title,
+        check.detail.clone(),
+    );
+    check
+}
+
+#[cfg(target_os = "windows")]
+fn run_install_step_with_progress<F>(
+    app: Option<&tauri::AppHandle>,
+    run_id: &str,
+    order: usize,
+    step: &str,
+    title: &str,
+    detail: &str,
+    task: F,
+) -> SystemProbeCheck
+where
+    F: FnOnce(Option<&tauri::AppHandle>, &str, usize, &str) -> SystemProbeCheck,
+{
+    emit_install_progress(
+        app,
+        run_id,
+        order * 100,
+        InstallProgressStatus::Running,
+        step,
+        None,
+        title,
+        detail,
+    );
+    let check = task(app, run_id, order, step);
+    emit_install_progress(
+        app,
+        run_id,
+        order * 100 + 99,
+        progress_status_from_probe(check.status),
+        step,
+        None,
         &check.title,
         check.detail.clone(),
     );
@@ -1574,7 +1641,37 @@ if ($null -ne $process.ExitCode -and $process.ExitCode -ne 0) {{
 
 #[cfg(target_os = "windows")]
 fn ensure_windows_winget() -> SystemProbeCheck {
+    ensure_windows_winget_with_progress(None, "", 0, "winget")
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_windows_winget_with_progress(
+    app: Option<&tauri::AppHandle>,
+    run_id: &str,
+    order: usize,
+    step: &str,
+) -> SystemProbeCheck {
+    emit_install_sub_progress(
+        app,
+        run_id,
+        order * 100 + 1,
+        InstallProgressStatus::Running,
+        step,
+        "detect",
+        "检测 winget",
+        "正在读取 winget --version。",
+    );
     if let Some(version) = windows_winget_version() {
+        emit_install_sub_progress(
+            app,
+            run_id,
+            order * 100 + 2,
+            InstallProgressStatus::Ok,
+            step,
+            "detect",
+            "检测 winget",
+            format!("已检测到 winget：{version}。"),
+        );
         return system_probe_check(
             SystemProbeStatus::Ok,
             "winget",
@@ -1584,6 +1681,16 @@ fn ensure_windows_winget() -> SystemProbeCheck {
         );
     }
 
+    emit_install_sub_progress(
+        app,
+        run_id,
+        order * 100 + 3,
+        InstallProgressStatus::Warning,
+        step,
+        "detect",
+        "检测 winget",
+        "未检测到 winget，将尝试拉起管理员 PowerShell 修复脚本。",
+    );
     let repair_script = r#"
 Set-ExecutionPolicy -Scope Process Bypass -Force
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -1593,36 +1700,112 @@ Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery | Out-
 Repair-WinGetPackageManager -AllUsers
 "#;
 
+    emit_install_sub_progress(
+        app,
+        run_id,
+        order * 100 + 4,
+        InstallProgressStatus::Running,
+        step,
+        "repair",
+        "修复 winget",
+        "正在请求管理员权限执行 NuGet/WinGet 修复脚本；如出现 UAC 弹窗请允许。",
+    );
     match run_windows_script_as_admin(repair_script) {
         Ok(message) => match windows_winget_version() {
-            Some(version) => system_probe_check(
-                SystemProbeStatus::Ok,
-                "winget",
-                "Windows 安装 Codex App 与 Node.js 需要 winget。",
-                format!("{message} 当前 winget：{version}。"),
-                "无需处理。",
-            ),
-            None => system_probe_check(
-                SystemProbeStatus::Warning,
-                "winget",
-                "Windows 安装 Codex App 与 Node.js 需要 winget。",
-                format!("{message} 但当前进程仍未检测到 winget。"),
-                "请重启切号器后再次点击安装 Codex；如果仍不行，确认系统 App Installer / Microsoft Store 是否可用。",
-            ),
+            Some(version) => {
+                emit_install_sub_progress(
+                    app,
+                    run_id,
+                    order * 100 + 5,
+                    InstallProgressStatus::Ok,
+                    step,
+                    "verify",
+                    "复查 winget",
+                    format!("{message} 当前 winget：{version}。"),
+                );
+                system_probe_check(
+                    SystemProbeStatus::Ok,
+                    "winget",
+                    "Windows 安装 Codex App 与 Node.js 需要 winget。",
+                    format!("{message} 当前 winget：{version}。"),
+                    "无需处理。",
+                )
+            }
+            None => {
+                emit_install_sub_progress(
+                    app,
+                    run_id,
+                    order * 100 + 5,
+                    InstallProgressStatus::Warning,
+                    step,
+                    "verify",
+                    "复查 winget",
+                    format!("{message} 但当前进程仍未检测到 winget。"),
+                );
+                system_probe_check(
+                    SystemProbeStatus::Warning,
+                    "winget",
+                    "Windows 安装 Codex App 与 Node.js 需要 winget。",
+                    format!("{message} 但当前进程仍未检测到 winget。"),
+                    "请重启切号器后再次点击安装 Codex；如果仍不行，确认系统 App Installer / Microsoft Store 是否可用。",
+                )
+            }
         },
-        Err(err) => system_probe_check(
-            SystemProbeStatus::Error,
-            "winget",
-            "Windows 安装 Codex App 与 Node.js 需要 winget。",
-            format!("未检测到 winget，且管理员修复脚本失败：{err}。"),
-            "请确认 UAC 弹窗已允许；若仍失败，请以管理员身份运行切号器，或手动安装 Microsoft App Installer 后重试。",
-        ),
+        Err(err) => {
+            emit_install_sub_progress(
+                app,
+                run_id,
+                order * 100 + 5,
+                InstallProgressStatus::Error,
+                step,
+                "repair",
+                "修复 winget",
+                format!("管理员修复脚本失败：{err}。"),
+            );
+            system_probe_check(
+                SystemProbeStatus::Error,
+                "winget",
+                "Windows 安装 Codex App 与 Node.js 需要 winget。",
+                format!("未检测到 winget，且管理员修复脚本失败：{err}。"),
+                "请确认 UAC 弹窗已允许；若仍失败，请以管理员身份运行切号器，或手动安装 Microsoft App Installer 后重试。",
+            )
+        }
     }
 }
 
 #[cfg(target_os = "windows")]
 fn ensure_windows_node() -> SystemProbeCheck {
+    ensure_windows_node_with_progress(None, "", 0, "node")
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_windows_node_with_progress(
+    app: Option<&tauri::AppHandle>,
+    run_id: &str,
+    order: usize,
+    step: &str,
+) -> SystemProbeCheck {
+    emit_install_sub_progress(
+        app,
+        run_id,
+        order * 100 + 1,
+        InstallProgressStatus::Running,
+        step,
+        "detect",
+        "检测 Node.js",
+        "正在读取 node --version。",
+    );
     if let Some(version) = node_version() {
+        emit_install_sub_progress(
+            app,
+            run_id,
+            order * 100 + 2,
+            InstallProgressStatus::Ok,
+            step,
+            "detect",
+            "检测 Node.js",
+            format!("已检测到 Node.js：{version}。"),
+        );
         return system_probe_check(
             SystemProbeStatus::Ok,
             "Node.js",
@@ -1632,6 +1815,16 @@ fn ensure_windows_node() -> SystemProbeCheck {
         );
     }
     if windows_winget_version().is_none() {
+        emit_install_sub_progress(
+            app,
+            run_id,
+            order * 100 + 2,
+            InstallProgressStatus::Error,
+            step,
+            "precheck",
+            "检查安装条件",
+            "未检测到 Node.js，且 winget 不可用，无法自动安装。",
+        );
         return system_probe_check(
             SystemProbeStatus::Error,
             "Node.js",
@@ -1641,6 +1834,16 @@ fn ensure_windows_node() -> SystemProbeCheck {
         );
     }
 
+    emit_install_sub_progress(
+        app,
+        run_id,
+        order * 100 + 3,
+        InstallProgressStatus::Running,
+        step,
+        "install",
+        "安装 Node.js",
+        "正在通过 winget 安装 OpenJS.NodeJS.LTS；如果系统安装器弹窗请求管理员权限，请允许。",
+    );
     let install_result = windows_cmd_capture(
         "winget",
         &[
@@ -1652,36 +1855,116 @@ fn ensure_windows_node() -> SystemProbeCheck {
             "--accept-source-agreements",
         ],
     );
+    emit_install_sub_progress(
+        app,
+        run_id,
+        order * 100 + 4,
+        InstallProgressStatus::Running,
+        step,
+        "verify",
+        "复查 Node.js",
+        "Node.js 安装命令已返回，正在重新读取 node --version。",
+    );
     match node_version() {
-        Some(version) => system_probe_check(
-            SystemProbeStatus::Ok,
-            "Node.js",
-            "Codex CLI 的 npm 安装路径需要 Node.js LTS。",
-            format!("已安装并检测到 Node.js：{version}。"),
-            "无需处理。",
-        ),
-        None => match install_result {
-            Ok(detail) => system_probe_check(
-                SystemProbeStatus::Warning,
+        Some(version) => {
+            emit_install_sub_progress(
+                app,
+                run_id,
+                order * 100 + 5,
+                InstallProgressStatus::Ok,
+                step,
+                "verify",
+                "复查 Node.js",
+                format!("已安装并检测到 Node.js：{version}。"),
+            );
+            system_probe_check(
+                SystemProbeStatus::Ok,
                 "Node.js",
                 "Codex CLI 的 npm 安装路径需要 Node.js LTS。",
-                format!("winget 已执行 Node.js LTS 安装：{detail}。但当前进程还未检测到 node。"),
-                "请重启切号器或重新登录 Windows 后再检测；Windows 安装器有时需要刷新 PATH。",
-            ),
-            Err(err) => system_probe_check(
-                SystemProbeStatus::Error,
-                "Node.js",
-                "Codex CLI 的 npm 安装路径需要 Node.js LTS。",
-                format!("未检测到 Node.js，自动安装失败：{err}。"),
-                "请确认 winget 可以访问源；也可以手动安装 Node.js LTS 后重试。",
-            ),
-        },
+                format!("已安装并检测到 Node.js：{version}。"),
+                "无需处理。",
+            )
+        }
+        None => {
+            match install_result {
+                Ok(detail) => {
+                    emit_install_sub_progress(
+                        app,
+                        run_id,
+                        order * 100 + 5,
+                        InstallProgressStatus::Warning,
+                        step,
+                        "verify",
+                        "复查 Node.js",
+                        format!(
+                            "winget 已执行 Node.js LTS 安装：{detail}。但当前进程还未检测到 node。"
+                        ),
+                    );
+                    system_probe_check(
+                    SystemProbeStatus::Warning,
+                    "Node.js",
+                    "Codex CLI 的 npm 安装路径需要 Node.js LTS。",
+                    format!("winget 已执行 Node.js LTS 安装：{detail}。但当前进程还未检测到 node。"),
+                    "请重启切号器或重新登录 Windows 后再检测；Windows 安装器有时需要刷新 PATH。",
+                )
+                }
+                Err(err) => {
+                    emit_install_sub_progress(
+                        app,
+                        run_id,
+                        order * 100 + 5,
+                        InstallProgressStatus::Error,
+                        step,
+                        "install",
+                        "安装 Node.js",
+                        format!("自动安装失败：{err}。"),
+                    );
+                    system_probe_check(
+                        SystemProbeStatus::Error,
+                        "Node.js",
+                        "Codex CLI 的 npm 安装路径需要 Node.js LTS。",
+                        format!("未检测到 Node.js，自动安装失败：{err}。"),
+                        "请确认 winget 可以访问源；也可以手动安装 Node.js LTS 后重试。",
+                    )
+                }
+            }
+        }
     }
 }
 
 #[cfg(target_os = "windows")]
 fn ensure_windows_codex_cli() -> SystemProbeCheck {
+    ensure_windows_codex_cli_with_progress(None, "", 0, "codex_cli")
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_windows_codex_cli_with_progress(
+    app: Option<&tauri::AppHandle>,
+    run_id: &str,
+    order: usize,
+    step: &str,
+) -> SystemProbeCheck {
+    emit_install_sub_progress(
+        app,
+        run_id,
+        order * 100 + 1,
+        InstallProgressStatus::Running,
+        step,
+        "detect",
+        "检测 Codex CLI",
+        "正在读取 codex --version。",
+    );
     if let Some(version) = codex_cli_version() {
+        emit_install_sub_progress(
+            app,
+            run_id,
+            order * 100 + 2,
+            InstallProgressStatus::Ok,
+            step,
+            "detect",
+            "检测 Codex CLI",
+            format!("已检测到 Codex CLI：{version}。"),
+        );
         return system_probe_check(
             SystemProbeStatus::Ok,
             "Codex CLI",
@@ -1691,15 +1974,65 @@ fn ensure_windows_codex_cli() -> SystemProbeCheck {
         );
     }
 
+    emit_install_sub_progress(
+        app,
+        run_id,
+        order * 100 + 3,
+        InstallProgressStatus::Running,
+        step,
+        "npm_precheck",
+        "检测 npm",
+        "正在检测 npm，存在时优先使用 npm install -g @openai/codex。",
+    );
     let npm_result = if npm_version().is_some() {
+        emit_install_sub_progress(
+            app,
+            run_id,
+            order * 100 + 4,
+            InstallProgressStatus::Running,
+            step,
+            "npm_install",
+            "npm 安装 Codex CLI",
+            "正在执行 npm install -g @openai/codex。",
+        );
         Some(windows_cmd_capture(
             "npm",
             &["install", "-g", "@openai/codex"],
         ))
     } else {
+        emit_install_sub_progress(
+            app,
+            run_id,
+            order * 100 + 4,
+            InstallProgressStatus::Warning,
+            step,
+            "npm_precheck",
+            "检测 npm",
+            "未检测到 npm，将跳过 npm 安装路径。",
+        );
         None
     };
+    emit_install_sub_progress(
+        app,
+        run_id,
+        order * 100 + 5,
+        InstallProgressStatus::Running,
+        step,
+        "verify_after_npm",
+        "复查 Codex CLI",
+        "正在 npm 安装后重新读取 codex --version。",
+    );
     if let Some(version) = codex_cli_version() {
+        emit_install_sub_progress(
+            app,
+            run_id,
+            order * 100 + 6,
+            InstallProgressStatus::Ok,
+            step,
+            "verify_after_npm",
+            "复查 Codex CLI",
+            format!("已通过 npm 安装并检测到 Codex CLI：{version}。"),
+        );
         return system_probe_check(
             SystemProbeStatus::Ok,
             "Codex CLI",
@@ -1711,15 +2044,55 @@ fn ensure_windows_codex_cli() -> SystemProbeCheck {
 
     let installer_result = if npm_result.as_ref().is_none_or(|result| result.is_err()) {
         let script = r#"irm https://chatgpt.com/codex/install.ps1 | iex"#;
+        emit_install_sub_progress(
+            app,
+            run_id,
+            order * 100 + 7,
+            InstallProgressStatus::Running,
+            step,
+            "official_script",
+            "官方脚本安装",
+            "npm 路径未成功，正在执行官方 Codex CLI PowerShell 安装脚本。",
+        );
         Some(
             windows_powershell_status(script)
                 .map(|_| "已执行官方 Codex CLI PowerShell 安装脚本。".to_string()),
         )
     } else {
+        emit_install_sub_progress(
+            app,
+            run_id,
+            order * 100 + 7,
+            InstallProgressStatus::Warning,
+            step,
+            "official_script",
+            "官方脚本安装",
+            "npm 安装命令已执行但当前仍未检测到 codex，暂不重复执行官方脚本。",
+        );
         None
     };
 
+    emit_install_sub_progress(
+        app,
+        run_id,
+        order * 100 + 8,
+        InstallProgressStatus::Running,
+        step,
+        "final_verify",
+        "最终复查 Codex CLI",
+        "正在最终读取 codex --version。",
+    );
     if let Some(version) = codex_cli_version() {
+        emit_install_sub_progress(
+            app,
+            run_id,
+            order * 100 + 9,
+            InstallProgressStatus::Ok,
+            step,
+            "final_verify",
+            "最终复查 Codex CLI",
+            format!("已安装并检测到 Codex CLI：{version}。"),
+        );
         return system_probe_check(
             SystemProbeStatus::Ok,
             "Codex CLI",
@@ -1748,6 +2121,20 @@ fn ensure_windows_codex_cli() -> SystemProbeCheck {
             || detail.contains("未检测到 npm")
             || detail.contains("not recognized")
     });
+    emit_install_sub_progress(
+        app,
+        run_id,
+        order * 100 + 9,
+        if has_hard_error {
+            InstallProgressStatus::Error
+        } else {
+            InstallProgressStatus::Warning
+        },
+        step,
+        "final_verify",
+        "最终复查 Codex CLI",
+        details.join(" "),
+    );
     system_probe_check(
         if has_hard_error {
             SystemProbeStatus::Error
@@ -1859,7 +2246,37 @@ fn codex_windows_process_exists() -> Result<bool, String> {
 
 #[cfg(target_os = "windows")]
 fn ensure_windows_codex_app() -> SystemProbeCheck {
+    ensure_windows_codex_app_with_progress(None, "", 0, "codex_app")
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_windows_codex_app_with_progress(
+    app: Option<&tauri::AppHandle>,
+    run_id: &str,
+    order: usize,
+    step: &str,
+) -> SystemProbeCheck {
+    emit_install_sub_progress(
+        app,
+        run_id,
+        order * 100 + 1,
+        InstallProgressStatus::Running,
+        step,
+        "detect",
+        "检测 Codex App",
+        "正在从 Windows AppX 包和开始菜单读取官方 Codex AppID。",
+    );
     if let Ok(app_id) = windows_codex_app_id() {
+        emit_install_sub_progress(
+            app,
+            run_id,
+            order * 100 + 2,
+            InstallProgressStatus::Ok,
+            step,
+            "detect",
+            "检测 Codex App",
+            format!("已检测到 Windows Codex App：{app_id}。"),
+        );
         return system_probe_check(
             SystemProbeStatus::Ok,
             "Codex App",
@@ -1869,6 +2286,16 @@ fn ensure_windows_codex_app() -> SystemProbeCheck {
         );
     }
     if windows_winget_version().is_none() {
+        emit_install_sub_progress(
+            app,
+            run_id,
+            order * 100 + 2,
+            InstallProgressStatus::Error,
+            step,
+            "precheck",
+            "检查安装条件",
+            "未检测到 Codex App，且 winget 不可用，无法自动安装。",
+        );
         return system_probe_check(
             SystemProbeStatus::Error,
             "Codex App",
@@ -1878,6 +2305,16 @@ fn ensure_windows_codex_app() -> SystemProbeCheck {
         );
     }
 
+    emit_install_sub_progress(
+        app,
+        run_id,
+        order * 100 + 3,
+        InstallProgressStatus::Running,
+        step,
+        "install",
+        "安装 Codex App",
+        "正在通过 winget install Codex -s msstore 安装；可能需要 Microsoft Store 或系统安装器确认。",
+    );
     let install_result = windows_cmd_capture(
         "winget",
         &[
@@ -1889,7 +2326,27 @@ fn ensure_windows_codex_app() -> SystemProbeCheck {
             "--accept-source-agreements",
         ],
     );
+    emit_install_sub_progress(
+        app,
+        run_id,
+        order * 100 + 4,
+        InstallProgressStatus::Running,
+        step,
+        "verify",
+        "复查 Codex App",
+        "安装命令已返回，正在重新读取官方 Codex AppID。",
+    );
     if let Ok(app_id) = windows_codex_app_id() {
+        emit_install_sub_progress(
+            app,
+            run_id,
+            order * 100 + 5,
+            InstallProgressStatus::Ok,
+            step,
+            "verify",
+            "复查 Codex App",
+            format!("已通过 winget install Codex -s msstore 安装并检测到 Codex App：{app_id}。"),
+        );
         return system_probe_check(
             SystemProbeStatus::Ok,
             "Codex App",
@@ -1900,20 +2357,44 @@ fn ensure_windows_codex_app() -> SystemProbeCheck {
     }
 
     match install_result {
-        Ok(detail) => system_probe_check(
-            SystemProbeStatus::Warning,
-            "Codex App",
-            "Codex 桌面版需要通过 Microsoft Store / winget 安装。",
-            format!("winget 已执行 Codex App 安装：{detail}。但当前仍未检测到 Codex App。"),
-            "请打开 Microsoft Store 的 Codex 安装页完成安装，或重启 Windows 后再次检测。",
-        ),
-        Err(err) => system_probe_check(
-            SystemProbeStatus::Error,
-            "Codex App",
-            "Codex 桌面版需要通过 Microsoft Store / winget 安装。",
-            format!("未检测到 Codex App，自动安装失败：{err}。"),
-            "请确认 Microsoft Store 可用；也可以手动运行 winget install Codex -s msstore。",
-        ),
+        Ok(detail) => {
+            emit_install_sub_progress(
+                app,
+                run_id,
+                order * 100 + 5,
+                InstallProgressStatus::Warning,
+                step,
+                "verify",
+                "复查 Codex App",
+                format!("winget 已执行 Codex App 安装：{detail}。但当前仍未检测到 Codex App。"),
+            );
+            system_probe_check(
+                SystemProbeStatus::Warning,
+                "Codex App",
+                "Codex 桌面版需要通过 Microsoft Store / winget 安装。",
+                format!("winget 已执行 Codex App 安装：{detail}。但当前仍未检测到 Codex App。"),
+                "请打开 Microsoft Store 的 Codex 安装页完成安装，或重启 Windows 后再次检测。",
+            )
+        }
+        Err(err) => {
+            emit_install_sub_progress(
+                app,
+                run_id,
+                order * 100 + 5,
+                InstallProgressStatus::Error,
+                step,
+                "install",
+                "安装 Codex App",
+                format!("自动安装失败：{err}。"),
+            );
+            system_probe_check(
+                SystemProbeStatus::Error,
+                "Codex App",
+                "Codex 桌面版需要通过 Microsoft Store / winget 安装。",
+                format!("未检测到 Codex App，自动安装失败：{err}。"),
+                "请确认 Microsoft Store 可用；也可以手动运行 winget install Codex -s msstore。",
+            )
+        }
     }
 }
 
@@ -1924,41 +2405,41 @@ fn install_codex_environment_impl(
 ) -> SystemProbeReport {
     start_install_progress(app, run_id);
     let mut checks = Vec::new();
-    checks.push(run_install_step(
+    checks.push(run_install_step_with_progress(
         app,
         run_id,
         1,
         "winget",
         "winget",
         "正在检测 winget；缺失时会尝试拉起管理员修复脚本。",
-        ensure_windows_winget,
+        ensure_windows_winget_with_progress,
     ));
-    checks.push(run_install_step(
+    checks.push(run_install_step_with_progress(
         app,
         run_id,
         2,
         "node",
         "Node.js",
         "正在检测 Node.js；缺失时会通过 winget 安装 Node.js LTS。",
-        ensure_windows_node,
+        ensure_windows_node_with_progress,
     ));
-    checks.push(run_install_step(
+    checks.push(run_install_step_with_progress(
         app,
         run_id,
         3,
         "codex_cli",
         "Codex CLI",
         "正在检测 Codex CLI；缺失时会优先使用 npm 安装，再尝试官方脚本。",
-        ensure_windows_codex_cli,
+        ensure_windows_codex_cli_with_progress,
     ));
-    checks.push(run_install_step(
+    checks.push(run_install_step_with_progress(
         app,
         run_id,
         4,
         "codex_app",
         "Codex App",
         "正在检测 Codex 桌面版；缺失时会通过 Microsoft Store / winget 安装。",
-        ensure_windows_codex_app,
+        ensure_windows_codex_app_with_progress,
     ));
     finish_install_report(app, run_id, checks)
 }

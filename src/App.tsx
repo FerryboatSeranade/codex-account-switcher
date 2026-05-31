@@ -284,7 +284,7 @@ const installProgressStatusLabel: Record<InstallProgressStatus, string> = {
   finished: "结束"
 };
 
-const appBuildLabel = "v0.1.17-install-progress";
+const appBuildLabel = "v0.1.18-auto-save-proxy";
 const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const AUTO_UPDATE_LAST_CHECK_KEY = "codex-account-switcher:last-auto-update-check";
 
@@ -1216,16 +1216,25 @@ function App() {
         input: gogoaisLogin
       });
       const nextBaseUrl = result.base_url ?? result.openai_base_url ?? proxyForm.base_url;
-      setProxyForm((current) => ({
-        ...current,
+      const nextProxyForm: ProxyForm = {
+        ...proxyForm,
+        name:
+          proxyForm.name.trim() ||
+          result.api_key_name ||
+          (gogoaisLogin.username.trim() ? `${gogoaisLogin.username.trim()} 中转` : defaultProxyForm.name),
         api_key: result.api_key,
         base_url: nextBaseUrl,
         codex_system: "api"
-      }));
+      };
+      setProxyForm(nextProxyForm);
+      const nextState = await invoke<AppState>("create_proxy_profile", {
+        input: nextProxyForm
+      });
+      setState(nextState);
       const expiresAt = formatBeijingDateTime(result.expires_at);
       const serviceStatus = serviceStatusLabel(result.service_status);
       const detail = [
-        "已获取并填入 API Key，认证方式已切到只用 API Key。",
+        `已获取 API Key，并自动保存为中转档案“${nextProxyForm.name}”。认证方式已切到只用 API Key。`,
         result.api_key_name ? `Key：${result.api_key_name}` : "",
         serviceStatus ? `服务状态：${serviceStatus}` : "",
         expiresAt ? `到期：${expiresAt}` : "",
@@ -1234,7 +1243,7 @@ function App() {
         .filter(Boolean)
         .join(" ");
       setNotice(detail);
-      setLastAction({ kind: "success", title: "中转 API Key 已填入", detail });
+      setLastAction({ kind: "success", title: "中转档案已保存", detail });
       setGogoaisLogin((current) => ({ ...current, password: "" }));
       setGogoaisLoggedIn(true);
       setProxyTab("config");
@@ -1786,7 +1795,7 @@ function App() {
                     disabled={!!busy || !gogoaisLogin.username.trim() || !gogoaisLogin.password.trim()}
                   >
                     {busy === "fetch-gogoais-key" ? <Loader2 className="spin" /> : <KeyRound />}
-                    获取并填入
+                    获取并保存
                   </button>
                 </div>
               ) : (

@@ -210,6 +210,8 @@ Some installers update PATH only for new processes. A warning result can still m
 
 The `New Proxy` form can fetch a Codex proxy API key from gogoais by username and password.
 
+After a successful fetch, the UI automatically creates a proxy profile with the returned API key and Base URL. The form is still filled so the user can inspect or adjust the saved values.
+
 Endpoint:
 
 ```text
@@ -341,7 +343,7 @@ If the GitHub repository name changes, update both files and the release workflo
 
 1. Bump versions in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
 2. Commit the changes.
-3. Create and push a tag, for example `v0.1.17`.
+3. Create and push a tag, for example `v0.1.18`.
 4. GitHub Actions builds installers, updater archives, signatures, and release metadata.
 5. Review the draft release, then publish it.
 

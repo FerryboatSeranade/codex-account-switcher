@@ -284,7 +284,7 @@ const installProgressStatusLabel: Record<InstallProgressStatus, string> = {
   finished: "结束"
 };
 
-const appBuildLabel = "v0.1.18-auto-save-proxy";
+const appBuildLabel = "v0.1.19-nonblocking-install";
 const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const AUTO_UPDATE_LAST_CHECK_KEY = "codex-account-switcher:last-auto-update-check";
 

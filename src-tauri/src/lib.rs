@@ -4290,9 +4290,14 @@ fn detect_codex_environment() -> Result<SystemProbeReport, String> {
 }
 
 #[tauri::command]
-fn install_codex_environment(app: tauri::AppHandle) -> Result<SystemProbeReport, String> {
+async fn install_codex_environment(app: tauri::AppHandle) -> Result<SystemProbeReport, String> {
     let run_id = Uuid::new_v4().to_string();
-    Ok(install_codex_environment_impl(Some(&app), &run_id))
+    let app_for_worker = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        install_codex_environment_impl(Some(&app_for_worker), &run_id)
+    })
+    .await
+    .map_err(|err| format!("安装任务异常退出：{err}"))
 }
 
 #[tauri::command]

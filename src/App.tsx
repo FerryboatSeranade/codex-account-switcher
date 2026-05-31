@@ -128,6 +128,8 @@ type InstallProgressEntry = {
   timestamp: string;
 };
 
+const installProgressTerminalStatuses: InstallProgressStatus[] = ["ok", "warning", "error", "finished"];
+
 type ActionFeedback = {
   kind: "success" | "info" | "error";
   title: string;
@@ -284,7 +286,7 @@ const installProgressStatusLabel: Record<InstallProgressStatus, string> = {
   finished: "结束"
 };
 
-const appBuildLabel = "v0.1.19-nonblocking-install";
+const appBuildLabel = "v0.1.20-windows-install-policy";
 const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const AUTO_UPDATE_LAST_CHECK_KEY = "codex-account-switcher:last-auto-update-check";
 
@@ -514,7 +516,7 @@ function App() {
   const manageCodexApp = clientPreference === "codex_app";
   const activeInstallProgress = installProgress.length > 0;
   const latestInstallProgress = activeInstallProgress
-    ? installProgress[installProgress.length - 1]
+    ? [...installProgress].sort((left, right) => left.order - right.order)[installProgress.length - 1]
     : null;
 
   function clearProbeReport() {
@@ -576,7 +578,18 @@ function App() {
       setInstallProgress((current) => {
         const sameRun = current.length === 0 || current[current.length - 1].run_id === next.run_id;
         const base = sameRun ? current : [];
-        return [...base, next].sort((left, right) => left.order - right.order);
+        const updated = [...base];
+        const sameStepIndex = updated.findIndex((entry) => entry.step === next.step);
+        if (sameStepIndex >= 0) {
+          const currentStep = updated[sameStepIndex];
+          const currentStepIsFinal = installProgressTerminalStatuses.includes(currentStep.status);
+          if (next.order >= currentStep.order || !currentStepIsFinal) {
+            updated[sameStepIndex] = next;
+          }
+        } else {
+          updated.push(next);
+        }
+        return updated.sort((left, right) => left.order - right.order);
       });
       setInstallProgressExpanded(true);
     })

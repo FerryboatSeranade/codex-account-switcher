@@ -1188,13 +1188,24 @@ fn write_to_command_stdin(program: &str, args: &[&str], text: &str) -> Result<()
 }
 
 #[cfg(target_os = "windows")]
+fn windows_powershell_script(script: &str) -> String {
+    format!(
+        r#"
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+{script}
+"#
+    )
+}
+
+#[cfg(target_os = "windows")]
 fn windows_powershell_status(script: &str) -> Result<(), String> {
+    let script = windows_powershell_script(script);
     let args = [
         "-NoProfile",
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        script,
+        script.as_str(),
     ];
     command_status_detail("powershell.exe", &args)
         .map_err(|err| err.detail())
@@ -1210,12 +1221,13 @@ fn windows_powershell_status(script: &str) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn windows_powershell_stdout(script: &str) -> Result<String, String> {
+    let script = windows_powershell_script(script);
     let args = [
         "-NoProfile",
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        script,
+        script.as_str(),
     ];
     command_stdout("powershell.exe", &args).or_else(|powershell_err| {
         command_stdout("pwsh", &args)

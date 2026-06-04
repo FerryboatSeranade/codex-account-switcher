@@ -8,12 +8,13 @@ use std::{
     collections::HashSet,
     env,
     fs::{self, File},
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     net::IpAddr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::mpsc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::Emitter;
 use toml_edit::{value, DocumentMut, Item, Table};
@@ -220,6 +221,15 @@ struct SwitchProfileResult {
 struct ClientPreferenceResult {
     message: String,
     app_state: AppState,
+}
+
+#[derive(Debug, Serialize)]
+struct DeviceAuthLoginResult {
+    message: String,
+    verification_url: Option<String>,
+    user_code: Option<String>,
+    expires_in_minutes: Option<u32>,
+    output: String,
 }
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -3213,7 +3223,13 @@ fn diagnostic_check(level: DiagnosticLevel, title: &str, detail: String) -> Diag
 }
 
 #[tauri::command]
-fn diagnose_codex_state() -> Result<CodexDiagnosticReport, String> {
+async fn diagnose_codex_state() -> Result<CodexDiagnosticReport, String> {
+    tauri::async_runtime::spawn_blocking(diagnose_codex_state_impl)
+        .await
+        .map_err(|err| format!("诊断任务异常退出：{err}"))?
+}
+
+fn diagnose_codex_state_impl() -> Result<CodexDiagnosticReport, String> {
     let (config, auth) = current_files()?;
     let current = current_state(None)?;
     let provider = config_provider(&config).unwrap_or_else(|| "未设置".to_string());
@@ -3344,7 +3360,13 @@ fn best_login_profile(store: &Store) -> Option<Profile> {
 }
 
 #[tauri::command]
-fn restore_account_mode() -> Result<RestoreAccountModeResult, String> {
+async fn restore_account_mode() -> Result<RestoreAccountModeResult, String> {
+    tauri::async_runtime::spawn_blocking(restore_account_mode_impl)
+        .await
+        .map_err(|err| format!("恢复账号体系任务异常退出：{err}"))?
+}
+
+fn restore_account_mode_impl() -> Result<RestoreAccountModeResult, String> {
     let dir = codex_dir()?;
     fs::create_dir_all(&dir).map_err(|err| format!("创建 ~/.codex 目录失败：{}", err))?;
     let mut store = load_store()?;
@@ -3402,7 +3424,13 @@ fn restore_account_mode() -> Result<RestoreAccountModeResult, String> {
 }
 
 #[tauri::command]
-fn clear_codex_state() -> Result<ClearCodexStateResult, String> {
+async fn clear_codex_state() -> Result<ClearCodexStateResult, String> {
+    tauri::async_runtime::spawn_blocking(clear_codex_state_impl)
+        .await
+        .map_err(|err| format!("重置账号状态任务异常退出：{err}"))?
+}
+
+fn clear_codex_state_impl() -> Result<ClearCodexStateResult, String> {
     let dir = codex_dir()?;
     fs::create_dir_all(&dir).map_err(|err| format!("创建 ~/.codex 目录失败：{}", err))?;
     let mut store = load_store()?;
@@ -3445,7 +3473,13 @@ fn clear_codex_state() -> Result<ClearCodexStateResult, String> {
 }
 
 #[tauri::command]
-fn delete_codex_file(name: String) -> Result<DeleteCodexFileResult, String> {
+async fn delete_codex_file(name: String) -> Result<DeleteCodexFileResult, String> {
+    tauri::async_runtime::spawn_blocking(move || delete_codex_file_impl(name))
+        .await
+        .map_err(|err| format!("删除 Codex 文件任务异常退出：{err}"))?
+}
+
+fn delete_codex_file_impl(name: String) -> Result<DeleteCodexFileResult, String> {
     let name = name.trim();
     if name != "auth.json" && name != "config.toml" {
         return Err("只能删除 auth.json 或 config.toml".to_string());
@@ -3730,7 +3764,13 @@ fn apply_profile(id: String, manage_codex_app: bool) -> Result<AppState, String>
 }
 
 #[tauri::command]
-fn switch_profile_and_restart(input: SwitchInput) -> Result<SwitchProfileResult, String> {
+async fn switch_profile_and_restart(input: SwitchInput) -> Result<SwitchProfileResult, String> {
+    tauri::async_runtime::spawn_blocking(move || switch_profile_and_restart_impl(input))
+        .await
+        .map_err(|err| format!("切换并重启任务异常退出：{err}"))?
+}
+
+fn switch_profile_and_restart_impl(input: SwitchInput) -> Result<SwitchProfileResult, String> {
     let store = load_store()?;
     let manage_codex_app =
         input.restart_codex_app && should_manage_codex_app(&store.client_preference);
@@ -3798,6 +3838,14 @@ fn open_path_with_system(path: &Path, label: &str) -> Result<(), String> {
     Err(format!("当前系统暂不支持打开 {label}"))
 }
 
+fn spawn_detached(program: &str, args: &[&str], label: &str) -> Result<(), String> {
+    Command::new(program)
+        .args(args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("打开 {label} 失败：{err}"))
+}
+
 #[tauri::command]
 fn open_codex_file(name: String) -> Result<String, String> {
     if name != "config.toml" && name != "auth.json" {
@@ -3811,6 +3859,259 @@ fn open_codex_file(name: String) -> Result<String, String> {
 #[tauri::command]
 fn open_codex_config() -> Result<String, String> {
     open_codex_file("config.toml".to_string())
+}
+
+fn strip_ansi_sequences(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && matches!(chars.peek(), Some('[')) {
+            chars.next();
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        output.push(ch);
+    }
+    output
+}
+
+fn extract_device_auth_url(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .find(|part| part.starts_with("https://") && part.contains("/codex/device"))
+        .map(|part| {
+            part.trim_matches(|ch: char| ch == '.' || ch == ',' || ch == ')' || ch == '(')
+                .to_string()
+        })
+}
+
+fn looks_like_device_code(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let Some(left) = parts.next() else {
+        return false;
+    };
+    let Some(right) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && left.len() >= 4
+        && right.len() >= 4
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '-')
+}
+
+fn extract_device_auth_code(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .map(|part| part.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-'))
+        .find(|part| looks_like_device_code(part))
+        .map(str::to_string)
+}
+
+fn spawn_codex_device_auth_child() -> Result<std::process::Child, String> {
+    #[cfg(target_os = "windows")]
+    let candidates = ["codex.cmd", "codex.exe", "codex"];
+
+    #[cfg(not(target_os = "windows"))]
+    let candidates = ["codex"];
+
+    let mut errors = Vec::new();
+    for program in candidates {
+        match Command::new(program)
+            .args(["login", "--device-auth"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => return Ok(child),
+            Err(err) => errors.push(format!("{program}: {err}")),
+        }
+    }
+
+    Err(format!(
+        "启动 codex login --device-auth 失败：{}",
+        errors.join("；")
+    ))
+}
+
+fn start_codex_device_auth_login_impl() -> Result<DeviceAuthLoginResult, String> {
+    let mut child = spawn_codex_device_auth_child()?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "无法读取 codex device auth 输出".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "无法读取 codex device auth 错误输出".to_string())?;
+    let (tx, rx) = mpsc::channel::<String>();
+    let tx_stdout = tx.clone();
+    thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            let _ = tx_stdout.send(line);
+        }
+    });
+    thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+
+    let started_at = Instant::now();
+    let timeout = Duration::from_secs(8);
+    let mut output_lines = Vec::new();
+    let mut verification_url = None;
+    let mut user_code = None;
+    while started_at.elapsed() < timeout {
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(line) => {
+                let cleaned = strip_ansi_sequences(&line);
+                if !cleaned.trim().is_empty() {
+                    output_lines.push(cleaned);
+                }
+                let joined = output_lines.join("\n");
+                verification_url = extract_device_auth_url(&joined);
+                user_code = extract_device_auth_code(&joined);
+                if verification_url.is_some() && user_code.is_some() {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Ok(Some(status)) = child.try_wait() {
+                    let joined = output_lines.join("\n");
+                    return Err(format!(
+                        "codex login --device-auth 提前退出：{status}。输出：{}",
+                        joined.trim()
+                    ));
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let output = output_lines.join("\n");
+    if verification_url.is_none() || user_code.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!(
+            "已启动 codex login --device-auth，但未在 {timeout:?} 内读取到设备码。输出：{}",
+            output.trim()
+        ));
+    }
+
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+
+    Ok(DeviceAuthLoginResult {
+        message: "已启动 Codex 设备码登录。请在浏览器打开链接并输入一次性 code；授权完成后刷新状态或导入当前档案。".to_string(),
+        verification_url,
+        user_code,
+        expires_in_minutes: Some(15),
+        output,
+    })
+}
+
+#[tauri::command]
+async fn start_codex_device_auth_login() -> Result<DeviceAuthLoginResult, String> {
+    tauri::async_runtime::spawn_blocking(start_codex_device_auth_login_impl)
+        .await
+        .map_err(|err| format!("设备码登录任务异常退出：{err}"))?
+}
+
+#[tauri::command]
+fn open_dns_settings() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        spawn_detached(
+            "open",
+            &["x-apple.systempreferences:com.apple.Network-Settings.extension"],
+            "macOS 网络设置",
+        )
+        .or_else(|_| {
+            spawn_detached(
+                "open",
+                &["/System/Library/PreferencePanes/Network.prefPane"],
+                "macOS 网络设置",
+            )
+        })?;
+        return Ok("已打开 macOS 网络设置。请选择当前网络服务并进入 DNS。".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        spawn_detached("control.exe", &["ncpa.cpl"], "Windows 网络连接")?;
+        return Ok(
+            "已打开 Windows 网络连接控制面板。右键当前网卡，进入属性 -> IPv4/IPv6 -> DNS。"
+                .to_string(),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if spawn_detached("gnome-control-center", &["network"], "GNOME 网络设置").is_ok()
+            || spawn_detached("systemsettings", &["kcm_networkmanagement"], "KDE 网络设置").is_ok()
+            || spawn_detached("nm-connection-editor", &[], "NetworkManager 连接编辑器").is_ok()
+        {
+            return Ok(
+                "已尝试打开 Linux 网络/DNS 设置。不同桌面环境入口可能略有不同。".to_string(),
+            );
+        }
+        return Err("未找到 gnome-control-center、systemsettings 或 nm-connection-editor。请手动打开系统网络设置。".to_string());
+    }
+
+    #[allow(unreachable_code)]
+    Err("当前系统暂不支持自动打开 DNS 设置".to_string())
+}
+
+#[tauri::command]
+fn open_network_settings() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        spawn_detached(
+            "open",
+            &["x-apple.systempreferences:com.apple.Network-Settings.extension"],
+            "macOS 网络设置",
+        )
+        .or_else(|_| {
+            spawn_detached(
+                "open",
+                &["/System/Library/PreferencePanes/Network.prefPane"],
+                "macOS 网络设置",
+            )
+        })?;
+        return Ok("已打开 macOS 网络设置。".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        spawn_detached("explorer.exe", &["ms-settings:network"], "Windows 网络设置")
+            .or_else(|_| spawn_detached("control.exe", &["ncpa.cpl"], "Windows 网络连接"))?;
+        return Ok("已打开 Windows 网络设置。".to_string());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if spawn_detached("gnome-control-center", &["network"], "GNOME 网络设置").is_ok()
+            || spawn_detached("systemsettings", &["kcm_networkmanagement"], "KDE 网络设置").is_ok()
+            || spawn_detached("nm-connection-editor", &[], "NetworkManager 连接编辑器").is_ok()
+        {
+            return Ok("已尝试打开 Linux 网络设置。".to_string());
+        }
+        return Err("未找到可用的 Linux 网络设置入口。请手动打开系统网络设置。".to_string());
+    }
+
+    #[allow(unreachable_code)]
+    Err("当前系统暂不支持自动打开网络设置".to_string())
 }
 
 const HOSTS_MARKER: &str = "codex-account-switcher";
@@ -4254,7 +4555,13 @@ fn flush_dns_cache() -> String {
 }
 
 #[tauri::command]
-fn upsert_hosts_mapping(input: HostsMappingInput) -> Result<HostsWriteResult, String> {
+async fn upsert_hosts_mapping(input: HostsMappingInput) -> Result<HostsWriteResult, String> {
+    tauri::async_runtime::spawn_blocking(move || upsert_hosts_mapping_impl(input))
+        .await
+        .map_err(|err| format!("写入 hosts 任务异常退出：{err}"))?
+}
+
+fn upsert_hosts_mapping_impl(input: HostsMappingInput) -> Result<HostsWriteResult, String> {
     let ip = validate_hosts_ip(&input.ip)?;
     let names = collect_hosts_names(&input.hostname, input.aliases.as_deref())?;
     let target_names = names.iter().map(|name| hosts_name_key(name)).collect();
@@ -4288,7 +4595,13 @@ fn upsert_hosts_mapping(input: HostsMappingInput) -> Result<HostsWriteResult, St
 }
 
 #[tauri::command]
-fn delete_hosts_mapping(hostname: String) -> Result<HostsWriteResult, String> {
+async fn delete_hosts_mapping(hostname: String) -> Result<HostsWriteResult, String> {
+    tauri::async_runtime::spawn_blocking(move || delete_hosts_mapping_impl(hostname))
+        .await
+        .map_err(|err| format!("删除 hosts 映射任务异常退出：{err}"))?
+}
+
+fn delete_hosts_mapping_impl(hostname: String) -> Result<HostsWriteResult, String> {
     let hostname = validate_hosts_name(&hostname)?;
     let path = hosts_path();
     let raw = read_hosts_file(&path)?;
@@ -4717,7 +5030,13 @@ fn detect_google_connectivity() -> SystemProbeCheck {
 }
 
 #[tauri::command]
-fn detect_system_network() -> Result<SystemProbeReport, String> {
+async fn detect_system_network() -> Result<SystemProbeReport, String> {
+    tauri::async_runtime::spawn_blocking(detect_system_network_impl)
+        .await
+        .map_err(|err| format!("网络检测任务异常退出：{err}"))?
+}
+
+fn detect_system_network_impl() -> Result<SystemProbeReport, String> {
     let checks = vec![
         detect_codex_files(),
         detect_system_proxy(),
@@ -4778,8 +5097,8 @@ fn detect_system_network() -> Result<SystemProbeReport, String> {
 }
 
 #[tauri::command]
-fn detect_codex_environment() -> Result<SystemProbeReport, String> {
-    detect_system_network()
+async fn detect_codex_environment() -> Result<SystemProbeReport, String> {
+    detect_system_network().await
 }
 
 #[tauri::command]
@@ -4794,7 +5113,13 @@ async fn install_codex_environment(app: tauri::AppHandle) -> Result<SystemProbeR
 }
 
 #[tauri::command]
-fn copy_text_to_clipboard(text: String) -> Result<String, String> {
+async fn copy_text_to_clipboard(text: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || copy_text_to_clipboard_impl(text))
+        .await
+        .map_err(|err| format!("复制任务异常退出：{err}"))?
+}
+
+fn copy_text_to_clipboard_impl(text: String) -> Result<String, String> {
     if text.trim().is_empty() {
         return Err("没有可复制的检测结果".to_string());
     }
@@ -4850,15 +5175,23 @@ fn copy_text_to_clipboard(text: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn restart_codex_app() -> Result<String, String> {
-    restart_codex_process()?;
-    Ok("已尝试重启 Codex app".to_string())
+async fn restart_codex_app() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        restart_codex_process()?;
+        Ok("已尝试重启 Codex app".to_string())
+    })
+    .await
+    .map_err(|err| format!("重启 Codex app 任务异常退出：{err}"))?
 }
 
 #[tauri::command]
-fn quit_codex_app() -> Result<String, String> {
-    quit_codex_process()?;
-    Ok("已尝试关闭 Codex app".to_string())
+async fn quit_codex_app() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        quit_codex_process()?;
+        Ok("已尝试关闭 Codex app".to_string())
+    })
+    .await
+    .map_err(|err| format!("关闭 Codex app 任务异常退出：{err}"))?
 }
 
 fn cleanup_legacy_shortcuts_on_startup() {
@@ -4934,6 +5267,9 @@ pub fn run() {
             delete_codex_file,
             open_codex_file,
             open_codex_config,
+            start_codex_device_auth_login,
+            open_dns_settings,
+            open_network_settings,
             get_hosts_state,
             upsert_hosts_mapping,
             delete_hosts_mapping,
@@ -5013,5 +5349,19 @@ mod tests {
         let raw = api_auth_json(" sk-test ");
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed["OPENAI_API_KEY"], "sk-test");
+    }
+
+    #[test]
+    fn parses_device_auth_output_with_ansi_sequences() {
+        let raw = "\u{1b}[94mhttps://auth.openai.com/codex/device\u{1b}[0m\nEnter this one-time code:\n\u{1b}[94m441C-21TGT\u{1b}[0m";
+        let output = strip_ansi_sequences(raw);
+        assert_eq!(
+            extract_device_auth_url(&output).as_deref(),
+            Some("https://auth.openai.com/codex/device")
+        );
+        assert_eq!(
+            extract_device_auth_code(&output).as_deref(),
+            Some("441C-21TGT")
+        );
     }
 }

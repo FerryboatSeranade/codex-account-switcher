@@ -22,6 +22,7 @@ import {
   Rocket,
   Settings2,
   ShieldCheck,
+  Wifi,
   Terminal,
   Trash2,
   UserRoundPlus,
@@ -173,6 +174,14 @@ type HostsWriteResult = {
   hosts_state: HostsState;
 };
 
+type DeviceAuthLoginResult = {
+  message: string;
+  verification_url?: string;
+  user_code?: string;
+  expires_in_minutes?: number;
+  output: string;
+};
+
 type ImportForm = {
   name: string;
   kind: ProfileKind;
@@ -291,7 +300,7 @@ const installProgressStatusLabel: Record<InstallProgressStatus, string> = {
   finished: "结束"
 };
 
-const appBuildLabel = "v0.1.21-install-substeps";
+const appBuildLabel = "v0.1.22-device-auth-dns";
 const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const AUTO_UPDATE_LAST_CHECK_KEY = "codex-account-switcher:last-auto-update-check";
 
@@ -512,6 +521,7 @@ function App() {
   const [downloadTotal, setDownloadTotal] = useState<number | null>(null);
   const [hostsState, setHostsState] = useState<HostsState | null>(null);
   const [hostsExpanded, setHostsExpanded] = useState(false);
+  const [deviceAuth, setDeviceAuth] = useState<DeviceAuthLoginResult | null>(null);
   const autoUpdateCheckInFlight = useRef(false);
   const [importForm, setImportForm] = useState<ImportForm>({
     name: "我的 Plus/Pro 账号",
@@ -910,6 +920,91 @@ function App() {
     } catch (err) {
       setError(String(err));
       setLastAction({ kind: "error", title: "打开失败", detail: String(err) });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function startDeviceAuthLogin() {
+    setError("");
+    setNotice("正在启动 Codex 设备码登录...");
+    setLastAction(null);
+    clearProbeReport();
+    setDeviceAuth(null);
+    setBusy("device-auth-login");
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("请在 Tauri 桌面窗口中启动设备码登录");
+      }
+      const result = await invoke<DeviceAuthLoginResult>("start_codex_device_auth_login");
+      setDeviceAuth(result);
+      const detail = [
+        result.message,
+        result.verification_url ? `链接：${result.verification_url}` : "",
+        result.user_code ? `Code：${result.user_code}` : "",
+        result.expires_in_minutes ? `有效期约 ${result.expires_in_minutes} 分钟。` : ""
+      ]
+        .filter(Boolean)
+        .join(" ");
+      setNotice(detail);
+      setLastAction({ kind: "success", title: "设备码登录已启动", detail });
+    } catch (err) {
+      const detail = String(err);
+      setError(detail);
+      setLastAction({ kind: "error", title: "设备码登录失败", detail });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function copyDeviceAuthCode() {
+    if (!deviceAuth?.user_code) {
+      return;
+    }
+    setBusy("copy-device-code");
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("请在 Tauri 桌面窗口中复制设备码");
+      }
+      const message = await invoke<string>("copy_text_to_clipboard", {
+        text: deviceAuth.user_code
+      });
+      setLastAction({ kind: "success", title: "设备码已复制", detail: message });
+    } catch (err) {
+      setLastAction({ kind: "error", title: "复制设备码失败", detail: String(err) });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function openSystemSettings(kind: "dns" | "network") {
+    setError("");
+    setNotice("");
+    setLastAction(null);
+    clearProbeReport();
+    const action = kind === "dns" ? "open-dns-settings" : "open-network-settings";
+    setBusy(action);
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("请在 Tauri 桌面窗口中打开系统设置");
+      }
+      const message = await invoke<string>(
+        kind === "dns" ? "open_dns_settings" : "open_network_settings"
+      );
+      setNotice(message);
+      setLastAction({
+        kind: "success",
+        title: kind === "dns" ? "已打开 DNS 设置" : "已打开网络设置",
+        detail: message
+      });
+    } catch (err) {
+      const detail = String(err);
+      setError(detail);
+      setLastAction({
+        kind: "error",
+        title: kind === "dns" ? "打开 DNS 设置失败" : "打开网络设置失败",
+        detail
+      });
     } finally {
       setBusy("");
     }
@@ -1623,6 +1718,10 @@ function App() {
               </div>
             </dl>
             <div className="status-actions">
+              <button className="primary reset-account" onClick={startDeviceAuthLogin} disabled={!!busy}>
+                {busy === "device-auth-login" ? <Loader2 className="spin" /> : <KeyRound />}
+                设备码登录
+              </button>
               <button className="danger text-danger reset-account" onClick={() => setPendingReset(true)} disabled={!!busy}>
                 {busy === "reset-account" ? <Loader2 className="spin" /> : <Trash2 />}
                 重置账号状态
@@ -1650,6 +1749,36 @@ function App() {
                     {busy === "restart-admin" ? <Loader2 className="spin" /> : <ShieldCheck />}
                     以管理员身份重启切号器
                   </button>
+                )}
+              </div>
+            )}
+            {deviceAuth && (
+              <div className="device-auth-panel">
+                <div>
+                  <span>链接</span>
+                  {deviceAuth.verification_url ? (
+                    <a href={deviceAuth.verification_url} target="_blank" rel="noreferrer">
+                      {deviceAuth.verification_url}
+                    </a>
+                  ) : (
+                    <b>未读取到链接</b>
+                  )}
+                </div>
+                <div>
+                  <span>Code</span>
+                  <b>{deviceAuth.user_code ?? "未读取到 code"}</b>
+                  <button
+                    className="ghost mini-button"
+                    type="button"
+                    onClick={copyDeviceAuthCode}
+                    disabled={!!busy || !deviceAuth.user_code}
+                  >
+                    {busy === "copy-device-code" ? <Loader2 className="spin" /> : <FileKey2 />}
+                    复制
+                  </button>
+                </div>
+                {deviceAuth.expires_in_minutes && (
+                  <small>有效期约 {deviceAuth.expires_in_minutes} 分钟</small>
                 )}
               </div>
             )}
@@ -1681,6 +1810,26 @@ function App() {
                   <button className="ghost mini-button" type="button" onClick={refreshHostsState} disabled={!!busy}>
                     {busy === "hosts-refresh" ? <Loader2 className="spin" /> : <RefreshCw />}
                     刷新
+                  </button>
+                </div>
+                <div className="hosts-tools-row">
+                  <button
+                    className="ghost mini-button"
+                    type="button"
+                    onClick={() => openSystemSettings("dns")}
+                    disabled={!!busy}
+                  >
+                    {busy === "open-dns-settings" ? <Loader2 className="spin" /> : <Globe2 />}
+                    打开 DNS 设置
+                  </button>
+                  <button
+                    className="ghost mini-button"
+                    type="button"
+                    onClick={() => openSystemSettings("network")}
+                    disabled={!!busy}
+                  >
+                    {busy === "open-network-settings" ? <Loader2 className="spin" /> : <Wifi />}
+                    打开网络设置
                   </button>
                 </div>
                 <form className="hosts-form" onSubmit={submitHostsMapping}>

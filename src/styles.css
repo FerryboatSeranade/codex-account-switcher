@@ -593,6 +593,12 @@ h3 {
   overflow-wrap: anywhere;
 }
 
+.hosts-tools-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 .mini-button {
   min-height: 34px;
   padding: 0 10px;
@@ -750,6 +756,40 @@ dl {
   margin-top: 4px;
   padding: 0 12px;
   font-size: 12px;
+}
+
+.device-auth-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid #cfe2ff;
+  border-radius: 8px;
+  color: #183153;
+  background: #f7fbff;
+  font-size: 12px;
+}
+
+.device-auth-panel div {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.device-auth-panel span,
+.device-auth-panel small {
+  color: #647086;
+  font-weight: 800;
+}
+
+.device-auth-panel a,
+.device-auth-panel b {
+  min-width: 0;
+  color: #1c2738;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .probe-panel {

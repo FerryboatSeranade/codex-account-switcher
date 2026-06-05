@@ -16,6 +16,7 @@ import {
   Globe2,
   KeyRound,
   Loader2,
+  PackageCheck,
   Plus,
   Power,
   RefreshCw,
@@ -182,6 +183,30 @@ type DeviceAuthLoginResult = {
   output: string;
 };
 
+type CodexPluginEntry = {
+  id: string;
+  name: string;
+  marketplace: string;
+  enabled: boolean;
+  configured: boolean;
+  installed: boolean;
+  summary: string;
+};
+
+type CodexPluginState = {
+  config_path: string;
+  config_exists: boolean;
+  marketplaces_configured: string[];
+  plugins: CodexPluginEntry[];
+};
+
+type CodexPluginWriteResult = {
+  message: string;
+  backup_dir?: string;
+  plugin_state: CodexPluginState;
+  app_state: AppState;
+};
+
 type ImportForm = {
   name: string;
   kind: ProfileKind;
@@ -300,7 +325,7 @@ const installProgressStatusLabel: Record<InstallProgressStatus, string> = {
   finished: "结束"
 };
 
-const appBuildLabel = "v0.1.22-device-auth-dns";
+const appBuildLabel = "v0.1.23-plugins-no-console";
 const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const AUTO_UPDATE_LAST_CHECK_KEY = "codex-account-switcher:last-auto-update-check";
 
@@ -478,6 +503,15 @@ function formatHostsEntry(entry: HostsEntry) {
   return `${entry.ip} ${entry.names.join(" ")}`;
 }
 
+function formatPluginSummary(state: CodexPluginState | null) {
+  if (!state) {
+    return "未读取";
+  }
+  const enabled = state.plugins.filter((plugin) => plugin.enabled).length;
+  const installed = state.plugins.filter((plugin) => plugin.installed).length;
+  return `${enabled} 已启用 / ${installed} 已安装缓存`;
+}
+
 function previewState(): AppState {
   return {
     current: {
@@ -522,6 +556,8 @@ function App() {
   const [hostsState, setHostsState] = useState<HostsState | null>(null);
   const [hostsExpanded, setHostsExpanded] = useState(false);
   const [deviceAuth, setDeviceAuth] = useState<DeviceAuthLoginResult | null>(null);
+  const [pluginState, setPluginState] = useState<CodexPluginState | null>(null);
+  const [pluginsExpanded, setPluginsExpanded] = useState(false);
   const autoUpdateCheckInFlight = useRef(false);
   const [importForm, setImportForm] = useState<ImportForm>({
     name: "我的 Plus/Pro 账号",
@@ -581,6 +617,16 @@ function App() {
           kind: "error",
           title: "hosts 状态读取失败",
           detail: String(hostsErr)
+        });
+      }
+      try {
+        setPluginState(await invoke<CodexPluginState>("get_codex_plugin_state"));
+      } catch (pluginErr) {
+        setPluginState(null);
+        setLastAction({
+          kind: "error",
+          title: "插件状态读取失败",
+          detail: String(pluginErr)
         });
       }
     } catch (err) {
@@ -1005,6 +1051,90 @@ function App() {
         title: kind === "dns" ? "打开 DNS 设置失败" : "打开网络设置失败",
         detail
       });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function refreshPluginState() {
+    setError("");
+    setNotice("");
+    setLastAction(null);
+    clearProbeReport();
+    setBusy("plugins-refresh");
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("请在 Tauri 桌面窗口中读取插件配置");
+      }
+      const result = await invoke<CodexPluginState>("get_codex_plugin_state");
+      setPluginState(result);
+      const detail = `已读取插件配置：${result.config_path}`;
+      setNotice(detail);
+      setLastAction({ kind: "success", title: "插件状态已刷新", detail });
+    } catch (err) {
+      const detail = String(err);
+      setError(detail);
+      setLastAction({ kind: "error", title: "读取插件状态失败", detail });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function enableRecommendedPlugins() {
+    setError("");
+    setNotice("正在启用推荐 Codex 插件...");
+    setLastAction(null);
+    clearProbeReport();
+    setBusy("plugins-enable-recommended");
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("请在 Tauri 桌面窗口中写入插件配置");
+      }
+      const result = await invoke<CodexPluginWriteResult>("enable_recommended_codex_plugins");
+      setPluginState(result.plugin_state);
+      setState(result.app_state);
+      const detail = result.backup_dir
+        ? `${result.message} 备份：${result.backup_dir}`
+        : result.message;
+      setNotice(detail);
+      setLastAction({ kind: "success", title: "插件已启用", detail });
+    } catch (err) {
+      const detail = String(err);
+      setError(detail);
+      setLastAction({ kind: "error", title: "启用插件失败", detail });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function setPluginEnabled(plugin: CodexPluginEntry, enabled: boolean) {
+    setError("");
+    setNotice("");
+    setLastAction(null);
+    clearProbeReport();
+    setBusy(`plugin-${plugin.id}`);
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("请在 Tauri 桌面窗口中写入插件配置");
+      }
+      const result = await invoke<CodexPluginWriteResult>("set_codex_plugin_enabled", {
+        input: { id: plugin.id, enabled }
+      });
+      setPluginState(result.plugin_state);
+      setState(result.app_state);
+      const detail = result.backup_dir
+        ? `${result.message} 备份：${result.backup_dir}`
+        : result.message;
+      setNotice(detail);
+      setLastAction({
+        kind: "success",
+        title: enabled ? "插件已启用" : "插件已禁用",
+        detail
+      });
+    } catch (err) {
+      const detail = String(err);
+      setError(detail);
+      setLastAction({ kind: "error", title: "插件配置写入失败", detail });
     } finally {
       setBusy("");
     }
@@ -1780,6 +1910,96 @@ function App() {
                 {deviceAuth.expires_in_minutes && (
                   <small>有效期约 {deviceAuth.expires_in_minutes} 分钟</small>
                 )}
+              </div>
+            )}
+          </div>
+
+          <div className="plugins-block">
+            <div className="status-title">
+              <PackageCheck />
+              <span>Codex 插件使能</span>
+            </div>
+            <button
+              className="plugins-summary"
+              type="button"
+              onClick={() => setPluginsExpanded((expanded) => !expanded)}
+              aria-expanded={pluginsExpanded}
+              title="展开/折叠插件配置"
+            >
+              <span>{formatPluginSummary(pluginState)}</span>
+              <ChevronDown className={pluginsExpanded ? "expanded" : ""} />
+            </button>
+            {pluginsExpanded && (
+              <div className="plugins-content">
+                <div className="plugins-tools-row">
+                  <button
+                    className="primary mini-button"
+                    type="button"
+                    onClick={enableRecommendedPlugins}
+                    disabled={!!busy}
+                  >
+                    {busy === "plugins-enable-recommended" ? <Loader2 className="spin" /> : <PackageCheck />}
+                    启用推荐插件
+                  </button>
+                  <button
+                    className="ghost mini-button"
+                    type="button"
+                    onClick={refreshPluginState}
+                    disabled={!!busy}
+                  >
+                    {busy === "plugins-refresh" ? <Loader2 className="spin" /> : <RefreshCw />}
+                    刷新
+                  </button>
+                </div>
+                <p className="plugins-note">
+                  配置层写入 [plugins.*] enabled；Codex++ 的“强制解锁入口/强制安装”属于页面注入能力。
+                </p>
+                <div className="plugins-path-row">
+                  <span className="path">{pluginState?.config_path ?? state?.current.config_path ?? "~/.codex/config.toml"}</span>
+                  <button className="ghost mini-button" type="button" onClick={() => openCodexFile("config.toml")} disabled={!!busy}>
+                    {busy === "open-config.toml" ? <Loader2 className="spin" /> : <ExternalLink />}
+                    打开
+                  </button>
+                </div>
+                <div className="plugins-marketplaces">
+                  <span>Marketplaces</span>
+                  <b>
+                    {pluginState?.marketplaces_configured.length
+                      ? pluginState.marketplaces_configured.join("、")
+                      : "未配置"}
+                  </b>
+                </div>
+                <div className="plugins-list">
+                  {(pluginState?.plugins ?? []).map((plugin) => (
+                    <div className={plugin.enabled ? "plugin-entry enabled" : "plugin-entry"} key={plugin.id}>
+                      <div>
+                        <strong>{plugin.name}</strong>
+                        <small>{plugin.id}</small>
+                        <p>{plugin.summary}</p>
+                        <div className="plugin-badges">
+                          <span>{plugin.marketplace}</span>
+                          <span>{plugin.installed ? "已安装缓存" : "未检测到缓存"}</span>
+                          <span>{plugin.configured ? "已写入配置" : "未写入配置"}</span>
+                        </div>
+                      </div>
+                      <button
+                        className={plugin.enabled ? "danger mini-button" : "primary mini-button"}
+                        type="button"
+                        onClick={() => setPluginEnabled(plugin, !plugin.enabled)}
+                        disabled={!!busy}
+                      >
+                        {busy === `plugin-${plugin.id}` ? <Loader2 className="spin" /> : <PackageCheck />}
+                        {plugin.enabled ? "禁用" : "启用"}
+                      </button>
+                    </div>
+                  ))}
+                  {pluginState && pluginState.plugins.length === 0 && (
+                    <p className="plugins-empty">暂无插件配置或插件缓存</p>
+                  )}
+                  {!pluginState && (
+                    <p className="plugins-empty">尚未读取插件状态</p>
+                  )}
+                </div>
               </div>
             )}
           </div>

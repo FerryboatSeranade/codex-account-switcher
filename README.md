@@ -61,6 +61,32 @@ The UI accepts a root Base URL such as `https://code.gogoais.com`; the saved pro
 - `/etc/hosts`: macOS/Linux local DNS override file.
 - `C:\Windows\System32\drivers\etc\hosts`: Windows local DNS override file.
 
+## Codex Plugin Enablement
+
+Codex plugin enablement has two different layers.
+
+Config-layer enablement is stored in `~/.codex/config.toml`:
+
+```toml
+[marketplaces.openai-bundled]
+last_updated = "2026-06-04T16:52:26Z"
+source_type = "local"
+source = "/path/to/openai-bundled"
+
+[plugins."browser@openai-bundled"]
+enabled = true
+```
+
+The switcher's `Codex 插件使能` panel reads and writes this layer. It can enable or disable `[plugins."<id>"]`, add a best-effort `[marketplaces.<name>]` table for official marketplaces, and show whether a plugin cache exists under `~/.codex/plugins/cache`.
+
+Codex++ has a separate page-injection layer. Its `插件市场解锁`, `强制解锁入口`, and `特殊插件强制安装` switches are implemented by launching Codex through Codex++ and injecting `renderer-inject.js` into the Codex App UI. That can spoof/unblock frontend state such as the plugin nav entry or disabled install buttons. This switcher does not inject into Codex App; it only manages the durable config files.
+
+After changing plugin config, restart the target client:
+
+- Codex App: restart Codex App.
+- VS Code extension: reload the VS Code window.
+- CLI/other clients: restart the process.
+
 ## Thread Database And Rollout Files
 
 Codex stores a thread in two layers:

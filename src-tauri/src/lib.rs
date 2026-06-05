@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use encoding_rs::GBK;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::{
     collections::HashSet,
     env,
@@ -19,6 +21,21 @@ use std::{
 use tauri::Emitter;
 use toml_edit::{value, DocumentMut, Item, Table};
 use uuid::Uuid;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[cfg(target_os = "windows")]
+fn hidden_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hidden_command(program: &str) -> Command {
+    Command::new(program)
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Profile {
@@ -230,6 +247,39 @@ struct DeviceAuthLoginResult {
     user_code: Option<String>,
     expires_in_minutes: Option<u32>,
     output: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct CodexPluginEntry {
+    id: String,
+    name: String,
+    marketplace: String,
+    enabled: bool,
+    configured: bool,
+    installed: bool,
+    summary: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CodexPluginState {
+    config_path: String,
+    config_exists: bool,
+    marketplaces_configured: Vec<String>,
+    plugins: Vec<CodexPluginEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexPluginToggleInput {
+    id: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct CodexPluginWriteResult {
+    message: String,
+    backup_dir: Option<String>,
+    plugin_state: CodexPluginState,
+    app_state: AppState,
 }
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -904,6 +954,305 @@ fn api_auth_json(api_key: &str) -> String {
     serde_json::json!({ "OPENAI_API_KEY": api_key.trim() }).to_string()
 }
 
+fn ensure_trailing_newline(mut raw: String) -> String {
+    if !raw.ends_with('\n') {
+        raw.push('\n');
+    }
+    raw
+}
+
+fn plugin_display_name(id: &str) -> String {
+    let name = id.split('@').next().unwrap_or(id);
+    name.split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn plugin_summary(id: &str) -> String {
+    match id {
+        "browser@openai-bundled" => "控制 Codex 内置浏览器，适合本地页面测试。".to_string(),
+        "chrome@openai-bundled" => {
+            "控制用户 Chrome，适合需要登录态或真实标签页的网页任务。".to_string()
+        }
+        "computer-use@openai-bundled" => "通过 Computer Use 控制桌面应用。".to_string(),
+        "documents@openai-primary-runtime" => "创建和编辑 Word/文档类产物。".to_string(),
+        "spreadsheets@openai-primary-runtime" => "创建、编辑和分析表格文件。".to_string(),
+        "presentations@openai-primary-runtime" => "创建、编辑和验证演示文稿。".to_string(),
+        "github@openai-curated" => "连接 GitHub，用于 PR、Issue 和 CI 工作流。".to_string(),
+        other => format!("Codex 插件配置项：{other}。"),
+    }
+}
+
+fn default_codex_plugin_entries() -> Vec<CodexPluginEntry> {
+    [
+        "browser@openai-bundled",
+        "chrome@openai-bundled",
+        "computer-use@openai-bundled",
+        "documents@openai-primary-runtime",
+        "spreadsheets@openai-primary-runtime",
+        "presentations@openai-primary-runtime",
+        "github@openai-curated",
+    ]
+    .iter()
+    .map(|id| {
+        let marketplace = id.split('@').nth(1).unwrap_or("custom").to_string();
+        CodexPluginEntry {
+            id: (*id).to_string(),
+            name: plugin_display_name(id),
+            marketplace,
+            enabled: false,
+            configured: false,
+            installed: false,
+            summary: plugin_summary(id),
+        }
+    })
+    .collect()
+}
+
+fn plugin_cache_root() -> Option<PathBuf> {
+    codex_dir()
+        .ok()
+        .map(|dir| dir.join("plugins").join("cache"))
+}
+
+fn plugin_cache_installed_ids() -> HashSet<String> {
+    let Some(root) = plugin_cache_root() else {
+        return HashSet::new();
+    };
+    let Ok(marketplaces) = fs::read_dir(root) else {
+        return HashSet::new();
+    };
+    let mut ids = HashSet::new();
+    for marketplace_entry in marketplaces.filter_map(Result::ok) {
+        let marketplace = marketplace_entry.file_name().to_string_lossy().to_string();
+        let Ok(plugin_names) = fs::read_dir(marketplace_entry.path()) else {
+            continue;
+        };
+        for plugin_entry in plugin_names.filter_map(Result::ok) {
+            if !plugin_entry.path().is_dir() {
+                continue;
+            }
+            let plugin_name = plugin_entry.file_name().to_string_lossy().to_string();
+            if plugin_name.is_empty() {
+                continue;
+            }
+            let Ok(versions) = fs::read_dir(plugin_entry.path()) else {
+                continue;
+            };
+            let installed = versions.filter_map(Result::ok).any(|version_entry| {
+                version_entry
+                    .path()
+                    .join(".codex-plugin")
+                    .join("plugin.json")
+                    .is_file()
+            });
+            if installed {
+                ids.insert(format!("{plugin_name}@{marketplace}"));
+            }
+        }
+    }
+    ids
+}
+
+fn parse_plugin_enabled(table: &toml_edit::Table) -> bool {
+    if table
+        .get("enabled")
+        .and_then(Item::as_bool)
+        .is_some_and(|enabled| !enabled)
+    {
+        return false;
+    }
+    if table
+        .get("disabled")
+        .and_then(Item::as_bool)
+        .is_some_and(|disabled| disabled)
+    {
+        return false;
+    }
+    true
+}
+
+fn plugin_entries_from_doc(doc: Option<&DocumentMut>) -> Vec<CodexPluginEntry> {
+    let installed_ids = plugin_cache_installed_ids();
+    let mut entries = default_codex_plugin_entries();
+    let mut seen: HashSet<String> = entries.iter().map(|entry| entry.id.clone()).collect();
+
+    if let Some(doc) = doc {
+        if let Some(plugins) = doc.get("plugins").and_then(Item::as_table) {
+            for (id, item) in plugins.iter() {
+                let Some(table) = item.as_table() else {
+                    continue;
+                };
+                let enabled = parse_plugin_enabled(table);
+                let marketplace = id.split('@').nth(1).unwrap_or("custom").to_string();
+                if let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) {
+                    entry.enabled = enabled;
+                    entry.configured = true;
+                    entry.marketplace = marketplace;
+                } else {
+                    entries.push(CodexPluginEntry {
+                        id: id.to_string(),
+                        name: plugin_display_name(id),
+                        marketplace,
+                        enabled,
+                        configured: true,
+                        installed: false,
+                        summary: plugin_summary(id),
+                    });
+                    seen.insert(id.to_string());
+                }
+            }
+        }
+    }
+
+    for id in installed_ids {
+        if !seen.contains(&id) {
+            let marketplace = id.split('@').nth(1).unwrap_or("custom").to_string();
+            entries.push(CodexPluginEntry {
+                id: id.clone(),
+                name: plugin_display_name(&id),
+                marketplace,
+                enabled: false,
+                configured: false,
+                installed: true,
+                summary: plugin_summary(&id),
+            });
+            seen.insert(id);
+        }
+    }
+
+    let installed_ids = plugin_cache_installed_ids();
+    for entry in &mut entries {
+        entry.installed = installed_ids.contains(&entry.id);
+    }
+    entries.sort_by(|left, right| left.id.cmp(&right.id));
+    entries
+}
+
+fn marketplaces_from_doc(doc: Option<&DocumentMut>) -> Vec<String> {
+    let mut marketplaces = doc
+        .and_then(|doc| doc.get("marketplaces"))
+        .and_then(Item::as_table)
+        .map(|table| {
+            table
+                .iter()
+                .map(|(name, _)| name.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    marketplaces.sort();
+    marketplaces
+}
+
+fn codex_plugin_state_from_config(config: Option<&str>, config_path: &Path) -> CodexPluginState {
+    let doc = config.and_then(|raw| raw.parse::<DocumentMut>().ok());
+    CodexPluginState {
+        config_path: config_path.to_string_lossy().to_string(),
+        config_exists: config.is_some(),
+        marketplaces_configured: marketplaces_from_doc(doc.as_ref()),
+        plugins: plugin_entries_from_doc(doc.as_ref()),
+    }
+}
+
+fn normalize_plugin_id(id: &str) -> Result<String, String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("插件 id 不能为空".to_string());
+    }
+    if !id.contains('@') {
+        return Err("插件 id 需要包含 marketplace，例如 browser@openai-bundled".to_string());
+    }
+    if id.chars().any(char::is_whitespace) {
+        return Err("插件 id 不能包含空白字符".to_string());
+    }
+    Ok(id.to_string())
+}
+
+fn ensure_openai_marketplace_table(doc: &mut DocumentMut, marketplace: &str) {
+    if !marketplace.starts_with("openai-") {
+        return;
+    }
+    if doc
+        .get("marketplaces")
+        .and_then(Item::as_table_like)
+        .and_then(|marketplaces| marketplaces.get(marketplace))
+        .is_some()
+    {
+        return;
+    }
+
+    let mut marketplace_table = Table::new();
+    marketplace_table["last_updated"] = value(Utc::now().to_rfc3339());
+    if let Some(root) = plugin_cache_root() {
+        let source = root.join(marketplace);
+        if source.exists() {
+            marketplace_table["source_type"] = value("local");
+            marketplace_table["source"] = value(source.to_string_lossy().to_string());
+        }
+    }
+
+    if doc.get("marketplaces").is_none() {
+        let mut marketplaces = Table::new();
+        marketplaces.set_implicit(true);
+        doc["marketplaces"] = Item::Table(marketplaces);
+    }
+    if let Some(marketplaces) = doc.get_mut("marketplaces").and_then(Item::as_table_mut) {
+        marketplaces[marketplace] = Item::Table(marketplace_table);
+    }
+}
+
+fn set_plugin_enabled_in_config(
+    raw: Option<&str>,
+    plugin_id: &str,
+    enabled: bool,
+) -> Result<String, String> {
+    let mut doc = match raw {
+        Some(value) => value
+            .parse::<DocumentMut>()
+            .map_err(|err| format!("config.toml TOML 解析失败，未写入插件配置：{err}"))?,
+        None => DocumentMut::new(),
+    };
+    let marketplace = plugin_id.split('@').nth(1).unwrap_or("custom");
+    ensure_openai_marketplace_table(&mut doc, marketplace);
+
+    if doc.get("plugins").is_none() {
+        let mut plugins = Table::new();
+        plugins.set_implicit(true);
+        doc["plugins"] = Item::Table(plugins);
+    }
+    if let Some(plugins) = doc.get_mut("plugins").and_then(Item::as_table_mut) {
+        if enabled {
+            let mut plugin_table = Table::new();
+            plugin_table["enabled"] = value(true);
+            plugins[plugin_id] = Item::Table(plugin_table);
+        } else if let Some(item) = plugins.get_mut(plugin_id) {
+            if let Some(table) = item.as_table_mut() {
+                table["enabled"] = value(false);
+                table.remove("disabled");
+            } else {
+                let mut plugin_table = Table::new();
+                plugin_table["enabled"] = value(false);
+                plugins[plugin_id] = Item::Table(plugin_table);
+            }
+        } else {
+            let mut plugin_table = Table::new();
+            plugin_table["enabled"] = value(false);
+            plugins[plugin_id] = Item::Table(plugin_table);
+        }
+    }
+    Ok(ensure_trailing_newline(
+        doc.to_string().trim_end().to_string(),
+    ))
+}
+
 fn ensure_api_profile_files(profile: &mut Profile) -> Result<(), String> {
     if profile.codex_system != CodexSystem::Api {
         return Ok(());
@@ -949,11 +1298,11 @@ fn update_recent_thread_providers() {
         return;
     }
     let script = "update threads set model_provider='openai' where model_provider='OpenAI';";
-    let _ = Command::new("sqlite3").arg(db_path).arg(script).status();
+    let _ = hidden_command("sqlite3").arg(db_path).arg(script).status();
 }
 
 fn command_stdout(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
+    let output = hidden_command(program)
         .args(args)
         .output()
         .map_err(|err| format!("执行 {program} 失败：{err}"))?;
@@ -979,7 +1328,7 @@ fn command_version(program: &str, args: &[&str]) -> Option<String> {
 }
 
 fn command_succeeds(program: &str, args: &[&str]) -> bool {
-    Command::new(program)
+    hidden_command(program)
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1011,7 +1360,7 @@ fn output_excerpt(text: &str, max_lines: usize) -> String {
 }
 
 fn run_command_capture(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
+    let output = hidden_command(program)
         .args(args)
         .output()
         .map_err(|err| format!("执行 {program} 失败：{err}"))?;
@@ -1153,15 +1502,16 @@ fn first_non_empty_lines(text: &str, max_lines: usize) -> String {
 
 #[cfg(target_os = "windows")]
 fn command_status_detail(program: &str, args: &[&str]) -> Result<(), WindowsCommandError> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|err| WindowsCommandError {
-            program: program.to_string(),
-            status: "未启动".to_string(),
-            stdout: String::new(),
-            stderr: format!("执行 {program} 失败：{err}"),
-        })?;
+    let output =
+        hidden_command(program)
+            .args(args)
+            .output()
+            .map_err(|err| WindowsCommandError {
+                program: program.to_string(),
+                status: "未启动".to_string(),
+                stdout: String::new(),
+                stderr: format!("执行 {program} 失败：{err}"),
+            })?;
     if output.status.success() {
         return Ok(());
     }
@@ -1175,7 +1525,7 @@ fn command_status_detail(program: &str, args: &[&str]) -> Result<(), WindowsComm
 }
 
 fn write_to_command_stdin(program: &str, args: &[&str], text: &str) -> Result<(), String> {
-    let mut child = Command::new(program)
+    let mut child = hidden_command(program)
         .args(args)
         .stdin(Stdio::piped())
         .spawn()
@@ -1264,7 +1614,7 @@ fn system_probe_check(
 
 #[cfg(target_os = "windows")]
 fn windows_cmd_stdout(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("cmd.exe")
+    let output = hidden_command("cmd.exe")
         .arg("/C")
         .arg(program)
         .args(args)
@@ -1298,7 +1648,7 @@ fn windows_cmd_version(program: &str, args: &[&str]) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn windows_cmd_succeeds(program: &str, args: &[&str]) -> bool {
-    Command::new("cmd.exe")
+    hidden_command("cmd.exe")
         .arg("/C")
         .arg(program)
         .args(args)
@@ -1311,7 +1661,7 @@ fn windows_cmd_succeeds(program: &str, args: &[&str]) -> bool {
 
 #[cfg(target_os = "windows")]
 fn windows_cmd_capture(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("cmd.exe")
+    let output = hidden_command("cmd.exe")
         .arg("/C")
         .arg(program)
         .args(args)
@@ -1636,7 +1986,7 @@ fn run_windows_script_as_admin(script: &str) -> Result<String, String> {
     let launcher = format!(
         r#"
 $ErrorActionPreference = "Stop"
-$process = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", {})
+$process = Start-Process -FilePath "powershell.exe" -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", {})
 if ($null -ne $process.ExitCode -and $process.ExitCode -ne 0) {{
   throw "管理员脚本退出码 $($process.ExitCode)"
 }}
@@ -2676,7 +3026,7 @@ fn ensure_macos_codex_app() -> SystemProbeCheck {
     let dmg_path = env::temp_dir().join(filename);
     let dmg_text = dmg_path.to_string_lossy().to_string();
     match run_command_capture("curl", &["-L", "--fail", "-o", &dmg_text, url]) {
-        Ok(detail) => match Command::new("open").arg(&dmg_path).status() {
+        Ok(detail) => match hidden_command("open").arg(&dmg_path).status() {
             Ok(status) if status.success() => system_probe_check(
                 SystemProbeStatus::Warning,
                 "Codex App",
@@ -2898,11 +3248,11 @@ fn install_codex_environment_impl(
 
 #[cfg(target_os = "macos")]
 fn quit_codex_process() -> Result<(), String> {
-    let _ = Command::new("osascript")
+    let _ = hidden_command("osascript")
         .args(["-e", r#"tell application "Codex" to quit"#])
         .status();
     thread::sleep(Duration::from_millis(900));
-    let _ = Command::new("pkill").args(["-x", "Codex"]).status();
+    let _ = hidden_command("pkill").args(["-x", "Codex"]).status();
     thread::sleep(Duration::from_millis(500));
     Ok(())
 }
@@ -3020,7 +3370,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe'" |
 
 #[cfg(target_os = "linux")]
 fn quit_codex_process() -> Result<(), String> {
-    let status = Command::new("sh")
+    let status = hidden_command("sh")
         .args([
             "-lc",
             "pkill -f '(^|/)(Codex|codex)( |$)' >/dev/null 2>&1 || true",
@@ -3041,7 +3391,7 @@ fn quit_codex_process() -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn start_codex_process() -> Result<(), String> {
-    let status = Command::new("open")
+    let status = hidden_command("open")
         .args(["-a", "Codex"])
         .status()
         .map_err(|err| format!("启动 Codex 失败：{}", err))?;
@@ -3056,15 +3406,11 @@ fn start_codex_process() -> Result<(), String> {
 fn start_codex_process() -> Result<(), String> {
     let app_id = windows_codex_app_id()
         .map_err(|err| format!("{err}。请先安装 Codex App，或通过“安装 Codex”按钮自动安装。"))?;
-    let script = format!(
-        r#"
-$ErrorActionPreference = "Stop"
-Start-Process {uri}
-"#,
-        uri = ps_single_quote(&format!("shell:AppsFolder\\{app_id}"))
-    );
-    windows_powershell_status(&script)
-        .map_err(|err| format!("未能通过 Windows AppID 启动 Codex App（{app_id}）。详细：{err}"))
+    hidden_command("explorer.exe")
+        .arg(format!("shell:AppsFolder\\{app_id}"))
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("未能通过 Windows AppID 启动 Codex App（{app_id}）：{err}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -3072,7 +3418,7 @@ fn start_codex_process() -> Result<(), String> {
     let script = r#"
 (gtk-launch codex.desktop >/dev/null 2>&1 || gtk-launch Codex.desktop >/dev/null 2>&1 || nohup codex >/dev/null 2>&1 &)
 "#;
-    let status = Command::new("sh")
+    let status = hidden_command("sh")
         .args(["-lc", script])
         .status()
         .map_err(|err| format!("启动 Codex 失败：{}", err))?;
@@ -3557,6 +3903,110 @@ fn get_app_state() -> Result<AppState, String> {
 }
 
 #[tauri::command]
+async fn get_codex_plugin_state() -> Result<CodexPluginState, String> {
+    tauri::async_runtime::spawn_blocking(get_codex_plugin_state_impl)
+        .await
+        .map_err(|err| format!("读取插件状态任务异常退出：{err}"))?
+}
+
+fn get_codex_plugin_state_impl() -> Result<CodexPluginState, String> {
+    let dir = codex_dir()?;
+    let config_path = dir.join("config.toml");
+    let config = read_optional(&config_path)?;
+    Ok(codex_plugin_state_from_config(
+        config.as_deref(),
+        &config_path,
+    ))
+}
+
+#[tauri::command]
+async fn set_codex_plugin_enabled(
+    input: CodexPluginToggleInput,
+) -> Result<CodexPluginWriteResult, String> {
+    tauri::async_runtime::spawn_blocking(move || set_codex_plugin_enabled_impl(input))
+        .await
+        .map_err(|err| format!("写入插件开关任务异常退出：{err}"))?
+}
+
+fn set_codex_plugin_enabled_impl(
+    input: CodexPluginToggleInput,
+) -> Result<CodexPluginWriteResult, String> {
+    let plugin_id = normalize_plugin_id(&input.id)?;
+    let dir = codex_dir()?;
+    fs::create_dir_all(&dir).map_err(|err| format!("创建 ~/.codex 目录失败：{}", err))?;
+    let config_path = dir.join("config.toml");
+    let current_config = read_optional(&config_path)?;
+    let backup_dir = backup_current()?;
+    let next_config =
+        set_plugin_enabled_in_config(current_config.as_deref(), &plugin_id, input.enabled)?;
+    fs::write(&config_path, next_config).map_err(|err| format!("写入插件配置失败：{}", err))?;
+    let plugin_state = get_codex_plugin_state_impl()?;
+    let message = format!(
+        "已{}插件 {plugin_id}。{}",
+        if input.enabled { "启用" } else { "禁用" },
+        client_refresh_hint(&load_store()?.client_preference)
+    );
+    Ok(CodexPluginWriteResult {
+        message,
+        backup_dir,
+        plugin_state,
+        app_state: get_app_state()?,
+    })
+}
+
+#[tauri::command]
+async fn enable_recommended_codex_plugins() -> Result<CodexPluginWriteResult, String> {
+    tauri::async_runtime::spawn_blocking(enable_recommended_codex_plugins_impl)
+        .await
+        .map_err(|err| format!("启用推荐插件任务异常退出：{err}"))?
+}
+
+fn enable_recommended_codex_plugins_impl() -> Result<CodexPluginWriteResult, String> {
+    let dir = codex_dir()?;
+    fs::create_dir_all(&dir).map_err(|err| format!("创建 ~/.codex 目录失败：{}", err))?;
+    let config_path = dir.join("config.toml");
+    let mut config = read_optional(&config_path)?;
+    let backup_dir = backup_current()?;
+    let installed_ids = plugin_cache_installed_ids();
+    let mut changed = Vec::new();
+    for entry in default_codex_plugin_entries() {
+        if !installed_ids.is_empty() && !installed_ids.contains(&entry.id) {
+            continue;
+        }
+        config = Some(set_plugin_enabled_in_config(
+            config.as_deref(),
+            &entry.id,
+            true,
+        )?);
+        changed.push(entry.id);
+    }
+    if changed.is_empty() {
+        return Err(
+            "没有发现可启用的官方插件缓存；请先在 Codex 插件市场安装插件，或手动启用单个 id。"
+                .to_string(),
+        );
+    }
+    fs::write(
+        &config_path,
+        config.unwrap_or_else(|| ensure_trailing_newline(String::new())),
+    )
+    .map_err(|err| format!("写入推荐插件配置失败：{}", err))?;
+    let plugin_state = get_codex_plugin_state_impl()?;
+    let message = format!(
+        "已启用 {} 个推荐插件：{}。{}",
+        changed.len(),
+        changed.join("、"),
+        client_refresh_hint(&load_store()?.client_preference)
+    );
+    Ok(CodexPluginWriteResult {
+        message,
+        backup_dir,
+        plugin_state,
+        app_state: get_app_state()?,
+    })
+}
+
+#[tauri::command]
 fn set_client_preference(input: ClientPreferenceInput) -> Result<ClientPreferenceResult, String> {
     let mut store = load_store()?;
     store.client_preference = input.preference;
@@ -3803,7 +4253,7 @@ fn open_path_with_system(path: &Path, label: &str) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        let status = Command::new("open")
+        let status = hidden_command("open")
             .arg(path)
             .status()
             .map_err(|err| format!("打开文件失败：{}", err))?;
@@ -3815,7 +4265,7 @@ fn open_path_with_system(path: &Path, label: &str) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        Command::new("notepad.exe")
+        hidden_command("notepad.exe")
             .arg(path)
             .spawn()
             .map_err(|err| format!("通过 notepad.exe 打开 {label} 失败：{err}"))?;
@@ -3824,7 +4274,7 @@ fn open_path_with_system(path: &Path, label: &str) -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
-        let status = Command::new("xdg-open")
+        let status = hidden_command("xdg-open")
             .arg(path)
             .status()
             .map_err(|err| format!("打开文件失败：{}", err))?;
@@ -3839,7 +4289,7 @@ fn open_path_with_system(path: &Path, label: &str) -> Result<(), String> {
 }
 
 fn spawn_detached(program: &str, args: &[&str], label: &str) -> Result<(), String> {
-    Command::new(program)
+    hidden_command(program)
         .args(args)
         .spawn()
         .map(|_| ())
@@ -3922,7 +4372,7 @@ fn spawn_codex_device_auth_child() -> Result<std::process::Child, String> {
 
     let mut errors = Vec::new();
     for program in candidates {
-        match Command::new(program)
+        match hidden_command(program)
             .args(["login", "--device-auth"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -4435,7 +4885,7 @@ fn write_hosts_file_elevated(path: &Path, text: &str) -> Result<(), String> {
         "do shell script {} with administrator privileges",
         apple_double_quote(&shell_command)
     );
-    let output = Command::new("osascript")
+    let output = hidden_command("osascript")
         .args(["-e", &script])
         .output()
         .map_err(|err| format!("请求 macOS 管理员权限失败：{err}"))?;
@@ -4513,11 +4963,11 @@ fn flush_dns_cache() -> String {
 
     #[cfg(target_os = "macos")]
     {
-        let dscache_ok = Command::new("dscacheutil")
+        let dscache_ok = hidden_command("dscacheutil")
             .arg("-flushcache")
             .status()
             .is_ok_and(|status| status.success());
-        let mdns_ok = Command::new("killall")
+        let mdns_ok = hidden_command("killall")
             .args(["-HUP", "mDNSResponder"])
             .status()
             .is_ok_and(|status| status.success());
@@ -4536,7 +4986,7 @@ fn flush_dns_cache() -> String {
             ("systemd-resolve", vec!["--flush-caches"]),
             ("nscd", vec!["-i", "hosts"]),
         ] {
-            if Command::new(program)
+            if hidden_command(program)
                 .args(args)
                 .status()
                 .is_ok_and(|status| status.success())
@@ -4975,7 +5425,7 @@ fn detect_google_connectivity() -> SystemProbeCheck {
     } else {
         "/dev/null"
     };
-    let output = Command::new("curl")
+    let output = hidden_command("curl")
         .args([
             "-L",
             "--connect-timeout",
@@ -5265,6 +5715,9 @@ pub fn run() {
             delete_profile,
             clear_codex_state,
             delete_codex_file,
+            get_codex_plugin_state,
+            set_codex_plugin_enabled,
+            enable_recommended_codex_plugins,
             open_codex_file,
             open_codex_config,
             start_codex_device_auth_login,
@@ -5349,6 +5802,56 @@ mod tests {
         let raw = api_auth_json(" sk-test ");
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed["OPENAI_API_KEY"], "sk-test");
+    }
+
+    #[test]
+    fn plugin_config_enables_plugin_and_marketplace() {
+        let config = set_plugin_enabled_in_config(
+            Some("model = \"gpt-5.5\"\n"),
+            "browser@openai-bundled",
+            true,
+        )
+        .unwrap();
+
+        assert!(config.contains("model = \"gpt-5.5\""), "{config}");
+        assert!(config.contains("[marketplaces.openai-bundled]"), "{config}");
+        assert!(
+            config.contains("[plugins.\"browser@openai-bundled\"]"),
+            "{config}"
+        );
+        assert!(config.contains("enabled = true"), "{config}");
+    }
+
+    #[test]
+    fn plugin_config_can_disable_existing_plugin() {
+        let config = set_plugin_enabled_in_config(
+            Some(
+                r#"[plugins."browser@openai-bundled"]
+enabled = true
+"#,
+            ),
+            "browser@openai-bundled",
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            config.contains("[plugins.\"browser@openai-bundled\"]"),
+            "{config}"
+        );
+        assert!(config.contains("enabled = false"), "{config}");
+        assert!(!config.contains("disabled = true"), "{config}");
+    }
+
+    #[test]
+    fn plugin_config_rejects_invalid_existing_toml() {
+        let result = set_plugin_enabled_in_config(
+            Some("[plugins.foo]\nenabled = true\n[plugins.foo]\nenabled = false\n"),
+            "browser@openai-bundled",
+            true,
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]
